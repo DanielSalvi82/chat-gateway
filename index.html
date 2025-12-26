@@ -178,7 +178,7 @@
         });
         const data = await res.json();
 
-        waitingBubble.textContent = data.reply || 'Resposta recebida.';
+        waitingBubble.innerHTML = (data.reply || 'Resposta recebida.').replace(/\n/g, '<br>');
       } catch (err) {
         waitingBubble.textContent = 'Erro ao enviar.';
       }
@@ -186,4 +186,5 @@
   </script>
 </body>
 </html>
+
 
