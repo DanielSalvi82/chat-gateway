@@ -17,6 +17,7 @@
       padding: 10px;
       background: #ddd;
       display: flex;
+      align-items: center;
     }
     #userInput {
       flex: 1;
@@ -32,6 +33,11 @@
       color: white;
       border-radius: 5px;
       cursor: pointer;
+    }
+    #currentUser {
+      margin-left: 15px;
+      font-weight: bold;
+      color: #333;
     }
     #messages {
       flex: 1;
@@ -82,6 +88,7 @@
   <div id="userConfig">
     <input id="userInput" type="text" placeholder="Digite seu nome/ID" />
     <button id="saveUser">Salvar</button>
+    <span id="currentUser"></span>
   </div>
 
   <!-- Área de mensagens -->
@@ -97,9 +104,10 @@
     const WEBHOOK_URL = "https://hook.us2.make.com/zdh65fxga487rr7a4rlnwspoefard0o5"; // substitua pela URL real
     let userId = localStorage.getItem('chat_user_id') || '';
 
-    // Preenche o campo com o ID salvo
+    // Preenche campo e mostra usuário salvo
     if (userId) {
       document.getElementById('userInput').value = userId;
+      document.getElementById('currentUser').textContent = "Usuário: " + userId;
     }
 
     // Salvar ID do usuário
@@ -107,7 +115,7 @@
       userId = document.getElementById('userInput').value.trim();
       if (userId) {
         localStorage.setItem('chat_user_id', userId);
-        alert("Usuário configurado: " + userId);
+        document.getElementById('currentUser').textContent = "Usuário: " + userId;
       }
     });
 
@@ -141,7 +149,6 @@
         });
         const data = await res.json();
 
-        // Atualiza a bolha com a resposta final
         waitingBubble.textContent = data.reply || 'Resposta recebida.';
       } catch (err) {
         waitingBubble.textContent = 'Erro ao enviar.';
