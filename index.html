@@ -1,14 +1,123 @@
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Chat Gateway</title>
+  <style>
+    body {
+      font-family: "Segoe UI", Arial, sans-serif;
+      margin: 0;
+      padding: 0;
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      background: #ece5dd;
+    }
+
+    /* Cabeçalho estilo WhatsApp */
+    #header {
+      background: #075e54;
+      color: white;
+      padding: 15px;
+      font-weight: bold;
+      text-align: center;
+    }
+
+    /* Configuração do usuário */
+    #userConfig {
+      background: #128c7e;
+      padding: 10px;
+      display: flex;
+      align-items: center;
+      color: white;
+    }
+    #userInput {
+      flex: 1;
+      padding: 8px;
+      border: none;
+      border-radius: 5px;
+    }
+    #saveUser {
+      margin-left: 10px;
+      padding: 8px 12px;
+      border: none;
+      background: #25d366;
+      color: white;
+      border-radius: 5px;
+      cursor: pointer;
+      font-weight: bold;
+    }
+    #currentUser {
+      margin-left: 15px;
+      font-weight: bold;
+    }
+
+    /* Área de mensagens */
+    #messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 15px;
+      background: #ece5dd;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .bubble {
+      max-width: 70%;
+      padding: 10px 15px;
+      margin: 5px;
+      border-radius: 20px;
+      word-wrap: break-word;
+      font-size: 14px;
+    }
+    .me {
+      background: #dcf8c6;
+      align-self: flex-end;
+    }
+    .you {
+      background: #fff;
+      border: 1px solid #ccc;
+      align-self: flex-start;
+    }
+
+    /* Rodapé estilo WhatsApp */
+    #chatForm {
+      display: flex;
+      padding: 10px;
+      background: #f0f0f0;
+      border-top: 1px solid #ccc;
+    }
+    #messageInput {
+      flex: 1;
+      padding: 10px;
+      border: none;
+      border-radius: 20px;
+      outline: none;
+    }
+    #chatForm button {
+      margin-left: 10px;
+      padding: 10px 15px;
+      border: none;
+      background: #25d366;
+      color: white;
+      border-radius: 50%;
+      cursor: pointer;
+      font-weight: bold;
+    }
+  </style>
+</head>
 <body>
-  <!-- Instrução fixa no topo -->
-  <div style="padding:10px; background:#007bff; color:white; font-weight:bold;">
-    👋 Bem-vindo! Digite seu UserID abaixo e clique em Salvar antes de começar.
+  <!-- Cabeçalho -->
+  <div id="header">
+    👋 Bem-vindo ao Chat Gateway — configure seu UserID abaixo
   </div>
 
   <!-- Configuração do usuário -->
   <div id="userConfig">
-    <input id="userInput" type="text" placeholder="Digite seu nome/ID" />
+    <input id="userInput" type="text" placeholder="Digite seu UserID" />
     <button id="saveUser">Salvar</button>
-    <span id="currentUser" style="margin-left:15px; font-weight:bold; color:#333;"></span>
+    <span id="currentUser"></span>
   </div>
 
   <!-- Área de mensagens -->
@@ -17,11 +126,11 @@
   <!-- Formulário de envio -->
   <form id="chatForm">
     <input id="messageInput" type="text" placeholder="Digite sua mensagem..." />
-    <button type="submit">Enviar</button>
+    <button type="submit">➤</button>
   </form>
 
   <script>
-    const WEBHOOK_URL = "https://hook.us2.make.com/zdh65fxga487rr7a4rlnwspoefard0o5"; 
+    const WEBHOOK_URL = "https://hook.eu1.make.com/seu-endereco-unico"; // substitua pela URL real
     let userId = localStorage.getItem('chat_user_id') || '';
 
     // Preenche campo e mostra usuário salvo
@@ -76,3 +185,4 @@
     });
   </script>
 </body>
+</html>
