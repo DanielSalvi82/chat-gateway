@@ -15,6 +15,7 @@
       background: #ece5dd;
     }
 
+    /* Cabeçalho estilo WhatsApp */
     #header {
       background: #075e54;
       color: white;
@@ -23,6 +24,7 @@
       text-align: center;
     }
 
+    /* Configuração do usuário */
     #userConfig {
       background: #128c7e;
       padding: 10px;
@@ -51,6 +53,7 @@
       font-weight: bold;
     }
 
+    /* Área de mensagens */
     #messages {
       flex: 1;
       overflow-y: auto;
@@ -78,6 +81,7 @@
       align-self: flex-start;
     }
 
+    /* Rodapé estilo WhatsApp */
     #chatForm {
       display: flex;
       padding: 10px;
@@ -102,38 +106,54 @@
       font-weight: bold;
     }
   </style>
+  <!-- Biblioteca de Markdown -->
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 </head>
 <body>
+  <!-- Cabeçalho -->
   <div id="header">
     👋 Bem-vindo ao Chat Gateway — configure seu UserID abaixo
   </div>
 
+  <!-- Configuração do usuário -->
   <div id="userConfig">
     <input id="userInput" type="text" placeholder="Digite seu UserID" />
     <button id="saveUser">Salvar</button>
     <span id="currentUser"></span>
   </div>
 
+  <!-- Área de mensagens -->
   <div id="messages"></div>
 
+  <!-- Formulário de envio -->
   <form id="chatForm">
     <input id="messageInput" type="text" placeholder="Digite sua mensagem..." />
     <button type="submit">➤</button>
   </form>
 
   <script>
-    // URLs dos webhooks do Make.com
-    const WEBHOOK_REQUEST = "https://hook.make.com/URL_DO_CENARIO_1";
-    const WEBHOOK_RESPONSE = "https://hook.make.com/URL_DO_CENARIO_2";
+    // ============================================
+    // CONFIGURAÇÃO - SUBSTITUA COM SEUS WEBHOOKS
+    // ============================================
+    const WEBHOOK_REQUEST = "https://hook.make.com/URL_DO_CENARIO_1"; // Webhook do Cenário 1 (Recebe e processa)
+    const WEBHOOK_RESPONSE = "https://hook.make.com/URL_DO_CENARIO_2"; // Webhook do Cenário 2 (Consulta status)
     
+    // ============================================
+    // VARIÁVEIS GLOBAIS
+    // ============================================
     let userId = localStorage.getItem('chat_user_id') || '';
 
+    // ============================================
+    // INICIALIZAÇÃO
+    // ============================================
     if (userId) {
       document.getElementById('userInput').value = userId;
       document.getElementById('currentUser').textContent = "Usuário: " + userId;
     }
 
+    // ============================================
+    // EVENTOS
+    // ============================================
     document.getElementById('saveUser').addEventListener('click', () => {
       userId = document.getElementById('userInput').value.trim();
       if (userId) {
@@ -141,15 +161,6 @@
         document.getElementById('currentUser').textContent = "Usuário: " + userId;
       }
     });
-
-    function appendMessage(who, text, isMarkdown = false) {
-      const div = document.createElement('div');
-      div.className = `bubble ${who}`;
-      div.innerHTML = isMarkdown ? marked.parse(text) : text;
-      document.getElementById('messages').appendChild(div);
-      document.getElementById('messages').scrollTop = document.getElementById('messages').scrollHeight;
-      return div;
-    }
 
     document.getElementById('chatForm').addEventListener('submit', async (e) => {
       e.preventDefault();
@@ -172,7 +183,7 @@
 
         // 2. Faz polling no Cenário 2
         let attempts = 0;
-        const maxAttempts = 12; // 60 segundos
+        const maxAttempts = 12; // 60 segundos total (12 × 5s)
         
         const interval = setInterval(async () => {
           attempts++;
@@ -188,15 +199,27 @@
             waitingBubble.innerHTML = marked.parse(statusData.result);
             clearInterval(interval);
           } else if (attempts >= maxAttempts) {
-            waitingBubble.textContent = '⏱️ Tempo limite excedido.';
+            waitingBubble.textContent = '⏱️ Tempo limite excedido (60s). Tente novamente.';
             clearInterval(interval);
           }
-        }, 5000); // Polling a cada 5 segundos
+        }, 5000); // Verifica a cada 5 segundos
 
       } catch (err) {
-        waitingBubble.textContent = '❌ Erro ao processar.';
+        waitingBubble.textContent = '❌ Erro ao processar: ' + err.message;
       }
     });
+
+    // ============================================
+    // FUNÇÕES
+    // ============================================
+    function appendMessage(who, text, isMarkdown = false) {
+      const div = document.createElement('div');
+      div.className = `bubble ${who}`;
+      div.innerHTML = isMarkdown ? marked.parse(text) : text;
+      document.getElementById('messages').appendChild(div);
+      document.getElementById('messages').scrollTop = document.getElementById('messages').scrollHeight;
+      return div;
+    }
   </script>
 </body>
 </html>
