@@ -15,7 +15,6 @@
       background: #ece5dd;
     }
 
-    /* Cabeçalho estilo WhatsApp */
     #header {
       background: #075e54;
       color: white;
@@ -24,7 +23,6 @@
       text-align: center;
     }
 
-    /* Configuração do usuário */
     #userConfig {
       background: #128c7e;
       padding: 10px;
@@ -53,7 +51,6 @@
       font-weight: bold;
     }
 
-    /* Área de mensagens */
     #messages {
       flex: 1;
       overflow-y: auto;
@@ -81,7 +78,6 @@
       align-self: flex-start;
     }
 
-    /* Rodapé estilo WhatsApp */
     #chatForm {
       display: flex;
       padding: 10px;
@@ -106,42 +102,38 @@
       font-weight: bold;
     }
   </style>
-  <!-- Biblioteca de Markdown -->
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 </head>
 <body>
-  <!-- Cabeçalho -->
   <div id="header">
     👋 Bem-vindo ao Chat Gateway — configure seu UserID abaixo
   </div>
 
-  <!-- Configuração do usuário -->
   <div id="userConfig">
     <input id="userInput" type="text" placeholder="Digite seu UserID" />
     <button id="saveUser">Salvar</button>
     <span id="currentUser"></span>
   </div>
 
-  <!-- Área de mensagens -->
   <div id="messages"></div>
 
-  <!-- Formulário de envio -->
   <form id="chatForm">
     <input id="messageInput" type="text" placeholder="Digite sua mensagem..." />
     <button type="submit">➤</button>
   </form>
 
   <script>
-    const WEBHOOK_URL = "https://hook.us2.make.com/zdh65fxga487rr7a4rlnwspoefard0o5"; // substitua pela URL real
+    // URLs dos webhooks do Make.com
+    const WEBHOOK_REQUEST = "https://hook.make.com/URL_DO_CENARIO_1";
+    const WEBHOOK_RESPONSE = "https://hook.make.com/URL_DO_CENARIO_2";
+    
     let userId = localStorage.getItem('chat_user_id') || '';
 
-    // Preenche campo e mostra usuário salvo
     if (userId) {
       document.getElementById('userInput').value = userId;
       document.getElementById('currentUser').textContent = "Usuário: " + userId;
     }
 
-    // Salvar ID do usuário
     document.getElementById('saveUser').addEventListener('click', () => {
       userId = document.getElementById('userInput').value.trim();
       if (userId) {
@@ -150,7 +142,6 @@
       }
     });
 
-    // Função para adicionar bolha
     function appendMessage(who, text, isMarkdown = false) {
       const div = document.createElement('div');
       div.className = `bubble ${who}`;
@@ -160,7 +151,6 @@
       return div;
     }
 
-    // Evento de envio
     document.getElementById('chatForm').addEventListener('submit', async (e) => {
       e.preventDefault();
       const text = document.getElementById('messageInput').value.trim();
@@ -168,21 +158,43 @@
 
       appendMessage('me', text);
       document.getElementById('messageInput').value = '';
-
-      // Bolha neutra de espera
-      const waitingBubble = appendMessage('you', '---⏰');
+      const waitingBubble = appendMessage('you', '⏰ Aguarde, estou planejando sua viagem...');
 
       try {
-        const res = await fetch(WEBHOOK_URL, {
+        // 1. Envia mensagem para Cenário 1
+        const res = await fetch(WEBHOOK_REQUEST, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ user_id: userId || 'anon', message: text })
         });
-        const data = await res.json();
+        
+        const { request_id } = await res.json();
 
-        waitingBubble.innerHTML = marked.parse(data.reply || 'Resposta recebida.');
+        // 2. Faz polling no Cenário 2
+        let attempts = 0;
+        const maxAttempts = 12; // 60 segundos
+        
+        const interval = setInterval(async () => {
+          attempts++;
+          
+          // Consulta status via GET
+          const statusRes = await fetch(
+            `${WEBHOOK_RESPONSE}?request_id=${request_id}`
+          );
+          const statusData = await statusRes.json();
+          
+          if (statusData.status === 'completed') {
+            // 3. Atualiza mensagem quando pronto
+            waitingBubble.innerHTML = marked.parse(statusData.result);
+            clearInterval(interval);
+          } else if (attempts >= maxAttempts) {
+            waitingBubble.textContent = '⏱️ Tempo limite excedido.';
+            clearInterval(interval);
+          }
+        }, 5000); // Polling a cada 5 segundos
+
       } catch (err) {
-        waitingBubble.textContent = 'Erro ao enviar.';
+        waitingBubble.textContent = '❌ Erro ao processar.';
       }
     });
   </script>
