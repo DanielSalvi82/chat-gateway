@@ -90,6 +90,7 @@
       padding: 10px;
       background: #f0f0f0;
       border-top: 1px solid #ccc;
+      align-items: center;
     }
     #messageInput {
       flex: 1;
@@ -107,6 +108,11 @@
       border-radius: 50%;
       cursor: pointer;
       font-weight: bold;
+    }
+    #statusBar {
+      font-size: 13px;
+      color: #444;
+      margin-left: 12px;
     }
   </style>
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
@@ -128,24 +134,52 @@
   <form id="chatForm">
     <input id="messageInput" type="text" placeholder="Digite sua mensagem... / Type your message..." />
     <button type="submit">➤</button>
+    <div id="statusBar"></div>
   </form>
 
   <script>
     // ============================
-    // CONFIGURAÇÃO - substitua pelos seus webhooks
+    // CONFIGURAÇÃO - ajuste estes endpoints
     // ============================
-    const WEBHOOK_REQUEST = "https://hook.us2.make.com/zdh65fxga487rr7a4rlnwspoefard0o5"; // Cenário 1
-    const WEBHOOK_RESPONSE = "https://hook.us2.make.com/j515ihtagyebly4l0mbuo36kch4zo9b8"; // Cenário 2 (polling)
-
-    // Delay antes de iniciar polling (em ms)
-    const POLLING_START_DELAY_MS = 30000; // 30s
-    const POLLING_INTERVAL_MS = 10000; // 10s
-    const POLLING_MAX_ATTEMPTS = 12; // 12 tentativas após início
-
+    // Endpoint Make que inicia o job (Cenário 1)
+    const WEBHOOK_REQUEST = "https://hook.us2.make.com/zdh65fxga487rr7a4rlnwspoefard0o5";
+    // WebSocket do seu backend (wss://...)
+    const WS_URL = "wss://seu-backend.example.com/ws";
+    // Endpoint opcional para checar status manualmente (fallback)
+    const STATUS_CHECK_URL = "https://seu-backend.example.com/status";
     const SHOW_DEBUG = false;
 
     // ============================
-    // Inicialização
+    // UI helpers e estado
+    // ============================
+    const messagesEl = document.getElementById('messages');
+    const statusBar = document.getElementById('statusBar');
+
+    function appendMessage(who, htmlContent) {
+      const div = document.createElement('div');
+      div.className = `bubble ${who}`;
+      div.innerHTML = htmlContent;
+      messagesEl.appendChild(div);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+      return div;
+    }
+
+    function appendDebug(text) {
+      if (!SHOW_DEBUG) return null;
+      const div = document.createElement('div');
+      div.className = 'debug';
+      div.textContent = text;
+      messagesEl.appendChild(div);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+      return div;
+    }
+
+    function setStatus(text) {
+      statusBar.textContent = text || '';
+    }
+
+    // ============================
+    // Preservar interface original: carregar/salvar userId
     // ============================
     let userId = localStorage.getItem('chat_user_id') || '';
     if (userId) {
@@ -162,29 +196,7 @@
     });
 
     // ============================
-    // Helpers
-    // ============================
-    function appendMessage(who, htmlContent) {
-      const div = document.createElement('div');
-      div.className = `bubble ${who}`;
-      div.innerHTML = htmlContent;
-      document.getElementById('messages').appendChild(div);
-      document.getElementById('messages').scrollTop = document.getElementById('messages').scrollHeight;
-      return div;
-    }
-
-    function appendDebug(text) {
-      if (!SHOW_DEBUG) return null;
-      const div = document.createElement('div');
-      div.className = 'debug';
-      div.textContent = text;
-      document.getElementById('messages').appendChild(div);
-      document.getElementById('messages').scrollTop = document.getElementById('messages').scrollHeight;
-      return div;
-    }
-
-    // ============================
-    // Robust JSON extraction from raw text
+    // Robust JSON extraction (mantido do original)
     // ============================
     function tryExtractJsonFromText(rawText) {
       if (!rawText || !rawText.trim()) return null;
@@ -202,7 +214,6 @@
         try { return JSON.parse(match[0]); } catch (e) {}
       }
 
-      // fallback: extract "reply" value via regex
       const replyRegex = /"reply"\s*:\s*"([\s\S]*?)"\s*(,|\})/i;
       const replyMatch = rawText.match(replyRegex);
       if (replyMatch && replyMatch[1]) {
@@ -214,9 +225,6 @@
       return null;
     }
 
-    // ============================
-    // Extrai texto útil de payloads variados
-    // ============================
     function extractTextFromPayload(obj) {
       if (!obj) return null;
       if (typeof obj === 'string') return obj;
@@ -252,9 +260,6 @@
       return null;
     }
 
-    // ============================
-    // Robust fetch json
-    // ============================
     async function robustFetchJson(response) {
       const contentType = response.headers.get('content-type') || '';
       const rawText = await response.text();
@@ -263,120 +268,92 @@
       return { parsed, rawText, contentType };
     }
 
-    // ============================
-    // Normaliza texto "quebrado" (ex.: O\nl\ná -> Olá)
-    // Preserva quebras de parágrafo e listas.
-    // ============================
     function normalizeBrokenText(s) {
       if (!s || typeof s !== 'string') return s;
-
-      // 1) Unescape common sequences
       let t = s.replace(/\\"/g, '"').replace(/\\r/g, '\r').replace(/\\t/g, '\t');
-
-      // 2) Se houver muitos casos de letra + newline + letra (ex: "O\nl\ná"), junta-os.
-      //    Substitui apenas quando newline separa letras sem espaço e sem formar palavras separadas.
-      //    Usa Unicode letters (inclui acentos).
       t = t.replace(/([^\s\W\d_])\n(?=[^\s\W\d_])/gu, '$1');
-
-      // 3) Se existirem sequências de múltiplas quebras de linha, reduz para duas (parágrafo)
       t = t.replace(/\n{3,}/g, '\n\n');
-
-      // 4) Remove quebras de linha que aparecem no meio de palavras por causa de wrap estranho:
-      //    Se houver letra + newline + letra e a palavra resultante tiver comprimento razoável, já foi juntada no passo 2.
-      //    Mantemos quebras de linha que seguem pontuação (.,!?), listas (-, *, 1.), headings (##).
-      //    Para segurança, também removemos quebras que aparecem entre letras e pontuação estranha:
       t = t.replace(/([^\s\W\d_])\n([.,;:!?])/gu, '$1$2');
-
-      // 5) Trim
       t = t.trim();
-
       return t;
     }
 
     // ============================
-    // Detecta completion de forma robusta
+    // WebSocket push: conexão e tratamento
     // ============================
-    function isCompleted(statusField, rawText, parsedObj) {
-      // 1) se statusField existe, normaliza e compara
-      if (statusField !== undefined && statusField !== null) {
-        try {
-          const s = String(statusField).trim().toLowerCase();
-          if (s === 'completed' || s === 'done' || s === 'finished' || s === 'success') return true;
-        } catch (e) {}
+    let ws = null;
+    let wsReconnectTimer = null;
+    const WS_RECONNECT_MS = 3000;
+
+    function connectWebSocket() {
+      if (!WS_URL) {
+        setStatus('WS_URL não configurado');
+        return;
       }
+      if (ws && ws.readyState === WebSocket.OPEN) return;
 
-      // 2) se parsedObj tem result/reply não vazio, considera completo
-      if (parsedObj) {
-        const txt = extractTextFromPayload(parsedObj);
-        if (txt && String(txt).trim().length > 0) return true;
+      setStatus('Conectando WebSocket...');
+      try {
+        ws = new WebSocket(WS_URL);
+
+        ws.addEventListener('open', () => {
+          setStatus('WebSocket conectado (push ativo)');
+          // opcional: identificar usuário para o backend (se suportado)
+          if (userId) {
+            try { ws.send(JSON.stringify({ type: 'identify', user_id: userId })); } catch(e) {}
+          }
+        });
+
+        ws.addEventListener('message', (evt) => {
+          try {
+            const payload = JSON.parse(evt.data);
+            // Espera payloads do tipo: { type: 'job_completed', request_id, status, response, response_markdown }
+            if (payload.type === 'job_completed') {
+              const finalText = payload.response || payload.result || payload.reply || '';
+              const normalized = normalizeBrokenText(finalText);
+              appendMessage('you', marked.parse(normalized));
+              setStatus('Finalizado (push) — ' + (payload.request_id || ''));
+              // limpar request_id salvo se for o mesmo
+              const saved = localStorage.getItem('last_request_id');
+              if (saved && payload.request_id && saved === payload.request_id) localStorage.removeItem('last_request_id');
+            } else if (payload.type === 'job_update') {
+              setStatus('Atualização: ' + (payload.status || 'processing'));
+            } else if (payload.type === 'welcome') {
+              if (payload.message) appendMessage('you', '<div class="meta">' + escapeHtml(payload.message) + '</div>');
+            } else {
+              // mensagens genéricas
+              if (payload.message) appendMessage('you', '<div class="meta">' + escapeHtml(payload.message) + '</div>');
+            }
+          } catch (e) {
+            console.error('WS message parse error', e);
+          }
+        });
+
+        ws.addEventListener('close', () => {
+          setStatus('WebSocket desconectado. Tentando reconectar em ' + (WS_RECONNECT_MS/1000) + 's...');
+          scheduleReconnect();
+        });
+
+        ws.addEventListener('error', (err) => {
+          console.error('WS error', err);
+          ws.close();
+        });
+      } catch (err) {
+        console.error('WS connect error', err);
+        scheduleReconnect();
       }
+    }
 
-      // 3) fallback: procura no rawText por "status":"completed" (caso venha com caracteres estranhos)
-      if (rawText && /"status"\s*:\s*"completed"/i.test(rawText)) return true;
-
-      return false;
+    function scheduleReconnect() {
+      if (wsReconnectTimer) return;
+      wsReconnectTimer = setTimeout(() => {
+        wsReconnectTimer = null;
+        connectWebSocket();
+      }, WS_RECONNECT_MS);
     }
 
     // ============================
-    // Inicia polling (reutilizável)
-    // ============================
-    function startPolling(requestId, waitingBubble) {
-      let attempts = 0;
-      const interval = setInterval(async () => {
-        attempts++;
-        try {
-          const statusRes = await fetch(`${WEBHOOK_RESPONSE}?request_id=${encodeURIComponent(requestId)}`);
-          const { parsed: statusParsed, rawText: statusRaw } = await robustFetchJson(statusRes);
-          if (SHOW_DEBUG) appendDebug('Polling raw:\n' + statusRaw);
-
-          // Detect completion robustamente
-          const completed = isCompleted(statusParsed?.status, statusRaw, statusParsed);
-
-          // Extrai texto útil
-          const extracted = extractTextFromPayload(statusParsed);
-          let finalText = extracted || statusParsed?.response || statusParsed?.result || statusParsed?.reply || statusRaw || '';
-
-          // Normaliza texto quebrado
-          finalText = normalizeBrokenText(finalText);
-
-          if (completed) {
-            // Renderiza Markdown formatado
-            waitingBubble.innerHTML = marked.parse(finalText);
-            clearInterval(interval);
-            return;
-          }
-
-          // Se não há status mas já temos conteúdo plausível, considera finalizado (compatibilidade)
-          if (!statusParsed?.status && extracted && String(extracted).trim().length > 0) {
-            waitingBubble.innerHTML = marked.parse(finalText);
-            clearInterval(interval);
-            return;
-          }
-
-          if (statusParsed && statusParsed.status && String(statusParsed.status).toLowerCase().includes('error')) {
-            waitingBubble.textContent = '❌ Erro / Error: ' + (statusParsed.error || statusParsed.message || 'unknown');
-            clearInterval(interval);
-            return;
-          }
-
-          if (attempts >= POLLING_MAX_ATTEMPTS) {
-            waitingBubble.textContent = '⏱️ Tempo limite excedido (120s) / Timeout exceeded (120s). Tente novamente / Try again.';
-            clearInterval(interval);
-            return;
-          }
-        } catch (pollErr) {
-          if (SHOW_DEBUG) appendDebug('Erro no polling: ' + String(pollErr));
-          console.error('Erro no polling:', pollErr);
-          if (attempts >= POLLING_MAX_ATTEMPTS) {
-            waitingBubble.textContent = '❌ Erro no polling / Polling error: ' + String(pollErr);
-            clearInterval(interval);
-          }
-        }
-      }, POLLING_INTERVAL_MS);
-    }
-
-    // ============================
-    // robust fetch json helper for initial request
+    // Envio inicial (Make -> GitHub dispatch) - sem polling
     // ============================
     async function initialRequest(body) {
       const res = await fetch(WEBHOOK_REQUEST, {
@@ -388,7 +365,7 @@
     }
 
     // ============================
-    // Main submit handler
+    // Handler do formulário (mantém aparência original)
     // ============================
     document.getElementById('chatForm').addEventListener('submit', async (e) => {
       e.preventDefault();
@@ -406,36 +383,23 @@
 
         const data = dataParsed || tryExtractJsonFromText(dataRaw);
 
-        // Se não parseou, mas rawText existe, tenta extrair reply e mostrar
-        if (!data && dataRaw && dataRaw.trim()) {
-          const fallback = tryExtractJsonFromText(dataRaw);
-          if (fallback && (fallback.reply || fallback.response || fallback.result)) {
-            const extracted = extractTextFromPayload(fallback);
-            const finalText = normalizeBrokenText(extracted || dataRaw);
-            waitingBubble.innerHTML = marked.parse(finalText);
-            return;
-          }
-          waitingBubble.innerHTML = marked.parse(normalizeBrokenText(dataRaw));
-          return;
-        }
-
-        // Se veio request_id -> inicia polling após delay silencioso
+        // Se veio request_id -> não iniciar polling; guardar request_id e aguardar push via WS
         if (data && data.request_id) {
           const requestId = data.request_id;
-
-          // Inicia polling após delay (silencioso)
-          setTimeout(() => {
-            startPolling(requestId, waitingBubble);
-          }, POLLING_START_DELAY_MS);
-
+          localStorage.setItem('last_request_id', requestId);
+          waitingBubble.innerHTML = '⏳ Requisição aceita — request_id: <b>' + escapeHtml(requestId) + '</b>. Aguardando resposta (push).';
+          setStatus('Aguardando resposta (push) — request_id: ' + requestId);
+          // conectar WS se ainda não conectado
+          connectWebSocket();
           return;
         }
 
-        // Sem request_id: resposta direta
+        // Se resposta direta (sem request_id), exibir imediatamente
         const extracted = extractTextFromPayload(data);
         if (extracted) {
           const finalText = normalizeBrokenText(extracted);
           waitingBubble.innerHTML = marked.parse(finalText);
+          setStatus('');
           return;
         }
 
@@ -445,6 +409,7 @@
             const final = typeof fallbackText === 'string' ? normalizeBrokenText(fallbackText) : normalizeBrokenText(extractTextFromPayload(fallbackText));
             if (final) {
               waitingBubble.innerHTML = marked.parse(final);
+              setStatus('');
               return;
             }
           }
@@ -452,19 +417,52 @@
 
         if (dataRaw && dataRaw.trim()) {
           waitingBubble.innerHTML = marked.parse(normalizeBrokenText(dataRaw));
+          setStatus('');
         } else {
           waitingBubble.textContent = "⚠️ Nenhum conteúdo retornado / No content returned";
+          setStatus('');
         }
       } catch (err) {
         console.error('Erro geral:', err);
         if (SHOW_DEBUG) appendDebug('Erro geral: ' + String(err));
         const waitingBubbleEl = document.querySelector('.bubble.you:last-child');
         if (waitingBubbleEl) waitingBubbleEl.textContent = '❌ Erro ao processar / Error processing: ' + err.message;
+        setStatus('');
       }
     });
 
     // ============================
-    // Small helper to escape HTML for user messages (prevents injection)
+    // Fallback: checar status manualmente (opcional)
+    // ============================
+    async function checkStatusManual() {
+      const requestId = localStorage.getItem('last_request_id');
+      if (!requestId) {
+        setStatus('Nenhum request_id salvo. Envie uma mensagem primeiro.');
+        return;
+      }
+      setStatus('Verificando status para ' + requestId + ' ...');
+
+      try {
+        const res = await fetch(STATUS_CHECK_URL + '?request_id=' + encodeURIComponent(requestId));
+        if (!res.ok) {
+          setStatus('Erro ao checar status: ' + res.status);
+          return;
+        }
+        const data = await res.json();
+        if (data.status && data.status.toLowerCase() === 'completed') {
+          appendMessage('you', marked.parse(data.response || data.result || data.reply || ''));
+          setStatus('Finalizado');
+          localStorage.removeItem('last_request_id');
+        } else {
+          setStatus('Status atual: ' + (data.status || 'processing'));
+        }
+      } catch (err) {
+        setStatus('Erro ao checar status: ' + err.message);
+      }
+    }
+
+    // ============================
+    // Pequeno helper para escapar HTML
     // ============================
     function escapeHtml(unsafe) {
       return unsafe
@@ -474,6 +472,21 @@
         .replace(/"/g, "&quot;")
         .replace(/'/g, "&#039;");
     }
+
+    // ============================
+    // Auto-connect WS on load if last_request_id exists (optional)
+    // ============================
+    window.addEventListener('load', () => {
+      const last = localStorage.getItem('last_request_id');
+      if (last) {
+        // tenta reconectar para receber push final
+        connectWebSocket();
+        setStatus('Aguardando resposta (push) — request_id: ' + last);
+      }
+    });
+
+    // Expor fallback check via console (opcional)
+    window.checkStatusManual = checkStatusManual;
   </script>
 </body>
 </html>
