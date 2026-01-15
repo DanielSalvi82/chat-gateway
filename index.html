@@ -123,9 +123,6 @@
   </form>
 
   <script>
-    // ============================================
-    // CONFIGURAÇÃO - SUBSTITUA COM SEUS WEBHOOKS
-    // ============================================
     const WEBHOOK_REQUEST = "https://hook.us2.make.com/zdh65fxga487rr7a4rlnwspoefard0o5"; // Cenário 1
     const WEBHOOK_RESPONSE = "https://hook.us2.make.com/j515ihtagyebly4l0mbuo36kch4zo9b8"; // Cenário 2
 
@@ -154,7 +151,6 @@
       const waitingBubble = appendMessage('you', '⏰');
 
       try {
-        // 1. Envia mensagem para Cenário 1
         const res = await fetch(WEBHOOK_REQUEST, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -163,18 +159,20 @@
 
         const data = await res.json();
 
-        // 2. Se veio request_id, inicia polling (Cenário 2)
         if (data.request_id) {
+          // Polling
           const requestId = data.request_id;
           let attempts = 0;
-          const maxAttempts = 12; // 12 tentativas (120s total)
+          const maxAttempts = 12;
           const interval = setInterval(async () => {
             attempts++;
             const statusRes = await fetch(`${WEBHOOK_RESPONSE}?request_id=${requestId}`);
             const statusData = await statusRes.json();
 
             if (statusData.status === 'completed') {
-              waitingBubble.innerHTML = marked.parse(statusData.response || statusData.result || statusData.reply || "");
+              waitingBubble.innerHTML = marked.parse(
+                statusData.response || statusData.result || statusData.reply || ""
+              );
               clearInterval(interval);
             } else if (statusData.status === 'error') {
               waitingBubble.textContent = '❌ Erro / Error: ' + (statusData.error || 'desconhecido / unknown');
@@ -183,9 +181,9 @@
               waitingBubble.textContent = '⏱️ Tempo limite excedido (120s) / Timeout exceeded (120s). Tente novamente / Try again.';
               clearInterval(interval);
             }
-          }, 10000); // verifica a cada 10 segundos
+          }, 10000);
         } else {
-          // 3. Se não veio request_id, fluxo finalizou direto
+          // Resposta direta
           if (data.response) {
             waitingBubble.innerHTML = marked.parse(data.response);
           } else if (data.result) {
