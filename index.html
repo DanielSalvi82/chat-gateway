@@ -63,6 +63,7 @@
       border-radius: 20px;
       word-wrap: break-word;
       font-size: 14px;
+      white-space: pre-wrap;
     }
     .me {
       background: #dcf8c6;
@@ -74,6 +75,7 @@
       align-self: flex-start;
     }
     .debug {
+      display: none; /* hidden by default; kept for dev if needed */
       background: #f7f7f7;
       color: #333;
       font-size: 12px;
@@ -135,6 +137,9 @@
     const WEBHOOK_REQUEST = "https://hook.us2.make.com/zdh65fxga487rr7a4rlnwspoefard0o5"; // Cenário 1
     const WEBHOOK_RESPONSE = "https://hook.us2.make.com/j515ihtagyebly4l0mbuo36kch4zo9b8"; // Cenário 2 (polling)
 
+    // Se quiser ver debug bruto na UI, coloque true; para produção deixe false
+    const SHOW_DEBUG = false;
+
     // ============================
     // Inicialização
     // ============================
@@ -155,16 +160,17 @@
     // ============================
     // Helpers: appendMessage + debug
     // ============================
-    function appendMessage(who, text, isMarkdown = false) {
+    function appendMessage(who, htmlContent) {
       const div = document.createElement('div');
       div.className = `bubble ${who}`;
-      div.innerHTML = isMarkdown ? marked.parse(text) : text;
+      div.innerHTML = htmlContent;
       document.getElementById('messages').appendChild(div);
       document.getElementById('messages').scrollTop = document.getElementById('messages').scrollHeight;
       return div;
     }
 
     function appendDebug(text) {
+      if (!SHOW_DEBUG) return null;
       const div = document.createElement('div');
       div.className = 'debug';
       div.textContent = text;
@@ -181,12 +187,10 @@
     // ============================
     function tryExtractJsonFromText(rawText) {
       if (!rawText || !rawText.trim()) return null;
-      // 1) direct parse
       try {
         return JSON.parse(rawText);
       } catch (e) {}
 
-      // 2) find first { and last } and try parse substring
       const firstBrace = rawText.indexOf('{');
       const lastBrace = rawText.lastIndexOf('}');
       if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
@@ -196,7 +200,6 @@
         } catch (e) {}
       }
 
-      // 3) try to find a JSON object after known prefixes like "Body" or "Bundle"
       const match = rawText.match(/\{[\s\S]*\}/);
       if (match) {
         try {
@@ -204,18 +207,14 @@
         } catch (e) {}
       }
 
-      // 4) fallback: try to extract "reply" value via regex (handles escaped quotes/newlines)
       const replyRegex = /"reply"\s*:\s*"([\s\S]*?)"\s*(,|\})/i;
       const replyMatch = rawText.match(replyRegex);
       if (replyMatch && replyMatch[1]) {
-        // unescape common sequences
         let val = replyMatch[1];
-        // Replace escaped quotes and newlines
         val = val.replace(/\\"/g, '"').replace(/\\n/g, '\n').replace(/\\r/g, '\r');
         return { reply: val };
       }
 
-      // 5) try single-quoted reply: 'reply': '...'
       const replyRegexSingle = /'reply'\s*:\s*'([\s\S]*?)'\s*(,|\})/i;
       const replyMatchSingle = rawText.match(replyRegexSingle);
       if (replyMatchSingle && replyMatchSingle[1]) {
@@ -232,7 +231,6 @@
       if (!obj) return null;
       if (typeof obj === 'string') return obj;
 
-      // direct keys
       const keys = ['response', 'result', 'reply', 'message', 'text', 'body', 'content'];
       for (const k of keys) {
         if (obj[k]) {
@@ -244,7 +242,6 @@
         }
       }
 
-      // arrays
       const arrayKeys = ['bundle', 'collection', 'items', 'data', 'results'];
       for (const k of arrayKeys) {
         if (Array.isArray(obj[k]) && obj[k].length > 0) {
@@ -253,7 +250,6 @@
         }
       }
 
-      // search recursively
       for (const key of Object.keys(obj)) {
         const val = obj[key];
         if (typeof val === 'string' && val.length > 10) return val;
@@ -276,10 +272,17 @@
       try {
         parsed = JSON.parse(rawText);
       } catch (e) {
-        // try to extract JSON substring
         parsed = tryExtractJsonFromText(rawText);
       }
       return { parsed, rawText, contentType };
+    }
+
+    // ============================
+    // Unescape common escaped sequences in strings
+    // ============================
+    function unescapeString(s) {
+      if (!s || typeof s !== 'string') return s;
+      return s.replace(/\\"/g, '"').replace(/\\n/g, '\n').replace(/\\r/g, '\r');
     }
 
     // ============================
@@ -290,7 +293,7 @@
       const text = document.getElementById('messageInput').value.trim();
       if (!text) return;
 
-      appendMessage('me', text);
+      appendMessage('me', escapeHtml(text));
       document.getElementById('messageInput').value = '';
       const waitingBubble = appendMessage('you', '⏰');
 
@@ -303,29 +306,30 @@
         });
 
         const { parsed: dataParsed, rawText: dataRaw } = await robustFetchJson(res);
-        appendDebug('Cenário 1 - raw response:\n' + dataRaw);
+        if (SHOW_DEBUG) appendDebug('Cenário 1 - raw response:\n' + dataRaw);
+        console.log('Cenário 1 raw:', dataRaw);
 
-        // If parsed null, try to extract JSON from raw text again
         const data = dataParsed || tryExtractJsonFromText(dataRaw);
 
-        // If data is null but raw text exists, try to extract reply via regex and show it
+        // If data is null but raw text exists, try to extract reply via regex
         if (!data && dataRaw && dataRaw.trim()) {
-          // try to extract reply directly
           const fallback = tryExtractJsonFromText(dataRaw);
           if (fallback && (fallback.reply || fallback.response || fallback.result)) {
             const extracted = extractTextFromPayload(fallback);
-            waitingBubble.innerHTML = marked.parse(extracted || dataRaw);
+            const finalText = unescapeString(extracted || dataRaw);
+            waitingBubble.innerHTML = marked.parse(finalText);
             return;
           }
-          // show raw text as last resort
-          waitingBubble.innerHTML = marked.parse(dataRaw);
+          // show raw text formatted as markdown
+          waitingBubble.innerHTML = marked.parse(unescapeString(dataRaw));
           return;
         }
 
         // If data contains request_id -> start polling
         if (data && data.request_id) {
           const requestId = data.request_id;
-          appendDebug('Cenário 1 returned request_id: ' + requestId);
+          if (SHOW_DEBUG) appendDebug('Cenário 1 returned request_id: ' + requestId);
+          console.log('request_id:', requestId);
           let attempts = 0;
           const maxAttempts = 12;
           const intervalMs = 10000;
@@ -334,25 +338,21 @@
             try {
               const statusRes = await fetch(`${WEBHOOK_RESPONSE}?request_id=${encodeURIComponent(requestId)}`);
               const { parsed: statusParsed, rawText: statusRaw } = await robustFetchJson(statusRes);
-              appendDebug('Polling attempt ' + attempts + ' - raw:\n' + statusRaw);
+              if (SHOW_DEBUG) appendDebug('Polling attempt ' + attempts + ' - raw:\n' + statusRaw);
+              console.log('Polling raw:', statusRaw);
 
               const statusData = statusParsed || tryExtractJsonFromText(statusRaw);
               const extracted = extractTextFromPayload(statusData);
+              const finalText = unescapeString(extracted || statusData?.response || statusData?.result || statusData?.reply || statusRaw || '');
 
               if (statusData && (statusData.status === 'completed' || statusData.status === 'done' || statusData.status === 'finished')) {
-                if (extracted) {
-                  waitingBubble.innerHTML = marked.parse(extracted);
-                } else {
-                  // try direct fields
-                  waitingBubble.innerHTML = marked.parse(statusData.response || statusData.result || statusData.reply || statusRaw || '');
-                }
+                waitingBubble.innerHTML = marked.parse(finalText);
                 clearInterval(interval);
                 return;
               }
 
-              // If statusData has no status but contains reply-like content, accept it
               if (!statusData?.status && extracted) {
-                waitingBubble.innerHTML = marked.parse(extracted);
+                waitingBubble.innerHTML = marked.parse(finalText);
                 clearInterval(interval);
                 return;
               }
@@ -369,7 +369,8 @@
                 return;
               }
             } catch (pollErr) {
-              appendDebug('Erro no polling: ' + String(pollErr));
+              if (SHOW_DEBUG) appendDebug('Erro no polling: ' + String(pollErr));
+              console.error('Erro no polling:', pollErr);
               if (attempts >= maxAttempts) {
                 waitingBubble.textContent = '❌ Erro no polling / Polling error: ' + String(pollErr);
                 clearInterval(interval);
@@ -380,17 +381,15 @@
           // No request_id: direct response branch
           const extracted = extractTextFromPayload(data);
           if (extracted) {
-            waitingBubble.innerHTML = marked.parse(extracted);
+            const finalText = unescapeString(extracted);
+            waitingBubble.innerHTML = marked.parse(finalText);
             return;
           }
 
-          // If data is null but raw text exists, show raw text (already handled above)
-          // If data exists but no extractable text, try common fields
           if (data) {
             const fallbackText = data.response || data.result || data.reply || data.body || null;
             if (fallbackText) {
-              // if body is object, extract recursively
-              const final = typeof fallbackText === 'string' ? fallbackText : extractTextFromPayload(fallbackText);
+              const final = typeof fallbackText === 'string' ? unescapeString(fallbackText) : extractTextFromPayload(fallbackText);
               if (final) {
                 waitingBubble.innerHTML = marked.parse(final);
                 return;
@@ -398,18 +397,31 @@
             }
           }
 
-          // last resort: show raw text or warning
           if (dataRaw && dataRaw.trim()) {
-            waitingBubble.innerHTML = marked.parse(dataRaw);
+            waitingBubble.innerHTML = marked.parse(unescapeString(dataRaw));
           } else {
             waitingBubble.textContent = "⚠️ Nenhum conteúdo retornado / No content returned";
           }
         }
       } catch (err) {
-        appendDebug('Erro geral: ' + String(err));
-        waitingBubble.textContent = '❌ Erro ao processar / Error processing: ' + err.message;
+        console.error('Erro geral:', err);
+        if (SHOW_DEBUG) appendDebug('Erro geral: ' + String(err));
+        const waitingBubbleEl = document.querySelector('.bubble.you:last-child');
+        if (waitingBubbleEl) waitingBubbleEl.textContent = '❌ Erro ao processar / Error processing: ' + err.message;
       }
     });
+
+    // ============================
+    // Small helper to escape HTML for user messages (prevents injection)
+    // ============================
+    function escapeHtml(unsafe) {
+      return unsafe
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+    }
   </script>
 </body>
 </html>
