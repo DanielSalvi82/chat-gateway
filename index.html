@@ -183,7 +183,7 @@
 
         // 2. Faz polling no Cenário 2
         let attempts = 0;
-        const maxAttempts = 12; // 60 segundos total (12 × 5s)
+        const maxAttempts = 12; // 120 segundos total (12 × 10s)
         
         const interval = setInterval(async () => {
           attempts++;
@@ -194,12 +194,15 @@
           );
           const statusData = await statusRes.json();
           
-          if (statusData.status === 'complete') {
+          if (statusData.status === 'completed') {
             // 3. Atualiza mensagem quando pronto
             waitingBubble.innerHTML = marked.parse(statusData.result);
             clearInterval(interval);
+            } else if (statusData.status === 'error') {
+            waitingBubble.textContent = '❌ Erro: ' + (statusData.error || 'desconhecido');
+            clearInterval(interval);
           } else if (attempts >= maxAttempts) {
-            waitingBubble.textContent = '⏱️ Tempo limite excedido (60s). Tente novamente.';
+            waitingBubble.textContent = '⏱️ Timed out. Try again';
             clearInterval(interval);
           }
         }, 10000); // Verifica a cada 10 segundos
@@ -223,4 +226,5 @@
   </script>
 </body>
 </html>
+
 
