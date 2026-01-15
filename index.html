@@ -174,7 +174,7 @@
             const statusData = await statusRes.json();
 
             if (statusData.status === 'completed') {
-              waitingBubble.innerHTML = marked.parse(statusData.response || "");
+              waitingBubble.innerHTML = marked.parse(statusData.response || statusData.result || statusData.reply || "");
               clearInterval(interval);
             } else if (statusData.status === 'error') {
               waitingBubble.textContent = '❌ Erro / Error: ' + (statusData.error || 'desconhecido / unknown');
@@ -190,6 +190,8 @@
             waitingBubble.innerHTML = marked.parse(data.response);
           } else if (data.result) {
             waitingBubble.innerHTML = marked.parse(data.result);
+          } else if (data.reply) {
+            waitingBubble.innerHTML = marked.parse(data.reply);
           } else {
             waitingBubble.textContent = "⚠️ Nenhum conteúdo retornado / No content returned";
           }
