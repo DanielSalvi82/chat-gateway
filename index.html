@@ -75,7 +75,7 @@
       align-self: flex-start;
     }
     .debug {
-      display: none; /* hidden by default; kept for dev if needed */
+      display: none;
       background: #f7f7f7;
       color: #333;
       font-size: 12px;
@@ -140,6 +140,13 @@
     // Se quiser ver debug bruto na UI, coloque true; para produção deixe false
     const SHOW_DEBUG = false;
 
+    // Delay antes de iniciar polling (em milissegundos)
+    const POLLING_START_DELAY_MS = 30000; // 30 segundos
+
+    // Intervalo de polling e tentativas
+    const POLLING_INTERVAL_MS = 10000; // 10 segundos entre tentativas
+    const POLLING_MAX_ATTEMPTS = 12; // total 12 tentativas (120s) após o início do polling
+
     // ============================
     // Inicialização
     // ============================
@@ -180,10 +187,7 @@
     }
 
     // ============================
-    // Robust JSON extraction from raw text:
-    // - tries JSON.parse
-    // - if fails, finds first "{" and last "}" and parses substring
-    // - if still fails, tries to extract "reply" value via regex
+    // Robust JSON extraction from raw text
     // ============================
     function tryExtractJsonFromText(rawText) {
       if (!rawText || !rawText.trim()) return null;
@@ -286,6 +290,56 @@
     }
 
     // ============================
+    // Inicia polling com parâmetros (função reutilizável)
+    // ============================
+    function startPolling(requestId, waitingBubble) {
+      let attempts = 0;
+      const interval = setInterval(async () => {
+        attempts++;
+        try {
+          const statusRes = await fetch(`${WEBHOOK_RESPONSE}?request_id=${encodeURIComponent(requestId)}`);
+          const { parsed: statusParsed, rawText: statusRaw } = await robustFetchJson(statusRes);
+          if (SHOW_DEBUG) appendDebug('Polling attempt ' + attempts + ' - raw:\n' + statusRaw);
+
+          const statusData = statusParsed || tryExtractJsonFromText(statusRaw);
+          const extracted = extractTextFromPayload(statusData);
+          const finalText = unescapeString(extracted || statusData?.response || statusData?.result || statusData?.reply || statusRaw || '');
+
+          if (statusData && (statusData.status === 'completed' || statusData.status === 'done' || statusData.status === 'finished')) {
+            waitingBubble.innerHTML = marked.parse(finalText);
+            clearInterval(interval);
+            return;
+          }
+
+          if (!statusData?.status && extracted) {
+            waitingBubble.innerHTML = marked.parse(finalText);
+            clearInterval(interval);
+            return;
+          }
+
+          if (statusData && statusData.status === 'error') {
+            waitingBubble.textContent = '❌ Erro / Error: ' + (statusData.error || statusData.message || 'unknown');
+            clearInterval(interval);
+            return;
+          }
+
+          if (attempts >= POLLING_MAX_ATTEMPTS) {
+            waitingBubble.textContent = '⏱️ Tempo limite excedido (120s) / Timeout exceeded (120s). Tente novamente / Try again.';
+            clearInterval(interval);
+            return;
+          }
+        } catch (pollErr) {
+          if (SHOW_DEBUG) appendDebug('Erro no polling: ' + String(pollErr));
+          console.error('Erro no polling:', pollErr);
+          if (attempts >= POLLING_MAX_ATTEMPTS) {
+            waitingBubble.textContent = '❌ Erro no polling / Polling error: ' + String(pollErr);
+            clearInterval(interval);
+          }
+        }
+      }, POLLING_INTERVAL_MS);
+    }
+
+    // ============================
     // Main submit handler
     // ============================
     document.getElementById('chatForm').addEventListener('submit', async (e) => {
@@ -295,7 +349,7 @@
 
       appendMessage('me', escapeHtml(text));
       document.getElementById('messageInput').value = '';
-      const waitingBubble = appendMessage('you', '⏰');
+      const waitingBubble = appendMessage('you', '⏳');
 
       try {
         // 1) send to scenario 1
@@ -325,58 +379,14 @@
           return;
         }
 
-        // If data contains request_id -> start polling
+        // If data contains request_id -> start polling AFTER delay (silencioso)
         if (data && data.request_id) {
           const requestId = data.request_id;
-          if (SHOW_DEBUG) appendDebug('Cenário 1 returned request_id: ' + requestId);
-          console.log('request_id:', requestId);
-          let attempts = 0;
-          const maxAttempts = 12;
-          const intervalMs = 10000;
-          const interval = setInterval(async () => {
-            attempts++;
-            try {
-              const statusRes = await fetch(`${WEBHOOK_RESPONSE}?request_id=${encodeURIComponent(requestId)}`);
-              const { parsed: statusParsed, rawText: statusRaw } = await robustFetchJson(statusRes);
-              if (SHOW_DEBUG) appendDebug('Polling attempt ' + attempts + ' - raw:\n' + statusRaw);
-              console.log('Polling raw:', statusRaw);
 
-              const statusData = statusParsed || tryExtractJsonFromText(statusRaw);
-              const extracted = extractTextFromPayload(statusData);
-              const finalText = unescapeString(extracted || statusData?.response || statusData?.result || statusData?.reply || statusRaw || '');
-
-              if (statusData && (statusData.status === 'completed' || statusData.status === 'done' || statusData.status === 'finished')) {
-                waitingBubble.innerHTML = marked.parse(finalText);
-                clearInterval(interval);
-                return;
-              }
-
-              if (!statusData?.status && extracted) {
-                waitingBubble.innerHTML = marked.parse(finalText);
-                clearInterval(interval);
-                return;
-              }
-
-              if (statusData && statusData.status === 'error') {
-                waitingBubble.textContent = '❌ Erro / Error: ' + (statusData.error || statusData.message || 'unknown');
-                clearInterval(interval);
-                return;
-              }
-
-              if (attempts >= maxAttempts) {
-                waitingBubble.textContent = '⏱️ Tempo limite excedido (120s) / Timeout exceeded (120s). Tente novamente / Try again.';
-                clearInterval(interval);
-                return;
-              }
-            } catch (pollErr) {
-              if (SHOW_DEBUG) appendDebug('Erro no polling: ' + String(pollErr));
-              console.error('Erro no polling:', pollErr);
-              if (attempts >= maxAttempts) {
-                waitingBubble.textContent = '❌ Erro no polling / Polling error: ' + String(pollErr);
-                clearInterval(interval);
-              }
-            }
-          }, intervalMs);
+          // inicia polling após o delay configurado (sem informar o usuário)
+          setTimeout(() => {
+            startPolling(requestId, waitingBubble);
+          }, POLLING_START_DELAY_MS);
         } else {
           // No request_id: direct response branch
           const extracted = extractTextFromPayload(data);
