@@ -14,8 +14,6 @@
       height: 100vh;
       background: #ece5dd;
     }
-
-    /* Cabeçalho estilo WhatsApp */
     #header {
       background: #075e54;
       color: white;
@@ -23,8 +21,6 @@
       font-weight: bold;
       text-align: center;
     }
-
-    /* Configuração do usuário */
     #userConfig {
       background: #128c7e;
       padding: 10px;
@@ -52,8 +48,6 @@
       margin-left: 15px;
       font-weight: bold;
     }
-
-    /* Área de mensagens */
     #messages {
       flex: 1;
       overflow-y: auto;
@@ -62,7 +56,6 @@
       display: flex;
       flex-direction: column;
     }
-
     .bubble {
       max-width: 70%;
       padding: 10px 15px;
@@ -80,8 +73,6 @@
       border: 1px solid #ccc;
       align-self: flex-start;
     }
-
-    /* Rodapé estilo WhatsApp */
     #chatForm {
       display: flex;
       padding: 10px;
@@ -106,19 +97,19 @@
       font-weight: bold;
     }
   </style>
-  <!-- Biblioteca de Markdown -->
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 </head>
 <body>
-  <!-- Cabeçalho -->
+  <!-- Cabeçalho bilíngue -->
   <div id="header">
-    👋 Bem-vindo ao Chat Gateway — configure seu UserID abaixo
+    👋 Bem-vindo ao Chat Gateway — configure seu UserID abaixo<br>
+    👋 Welcome to Chat Gateway — set your UserID below
   </div>
 
   <!-- Configuração do usuário -->
   <div id="userConfig">
-    <input id="userInput" type="text" placeholder="Digite seu UserID" />
-    <button id="saveUser">Salvar</button>
+    <input id="userInput" type="text" placeholder="Digite seu UserID / Enter your UserID" />
+    <button id="saveUser">Salvar / Save</button>
     <span id="currentUser"></span>
   </div>
 
@@ -127,7 +118,7 @@
 
   <!-- Formulário de envio -->
   <form id="chatForm">
-    <input id="messageInput" type="text" placeholder="Digite sua mensagem..." />
+    <input id="messageInput" type="text" placeholder="Digite sua mensagem... / Type your message..." />
     <button type="submit">➤</button>
   </form>
 
@@ -135,30 +126,21 @@
     // ============================================
     // CONFIGURAÇÃO - SUBSTITUA COM SEUS WEBHOOKS
     // ============================================
-    const WEBHOOK_REQUEST = "https://hook.us2.make.com/zdh65fxga487rr7a4rlnwspoefard0o5"; // Webhook do Cenário 1 (Recebe e processa)
-    const WEBHOOK_RESPONSE = "https://hook.us2.make.com/j515ihtagyebly4l0mbuo36kch4zo9b8"; // Webhook do Cenário 2 (Consulta status)
-    
-    // ============================================
-    // VARIÁVEIS GLOBAIS
-    // ============================================
+    const WEBHOOK_REQUEST = "https://hook.us2.make.com/zdh65fxga487rr7a4rlnwspoefard0o5"; // Cenário 1
+    const WEBHOOK_RESPONSE = "https://hook.us2.make.com/j515ihtagyebly4l0mbuo36kch4zo9b8"; // Cenário 2
+
     let userId = localStorage.getItem('chat_user_id') || '';
 
-    // ============================================
-    // INICIALIZAÇÃO
-    // ============================================
     if (userId) {
       document.getElementById('userInput').value = userId;
-      document.getElementById('currentUser').textContent = "Usuário: " + userId;
+      document.getElementById('currentUser').textContent = "Usuário / User: " + userId;
     }
 
-    // ============================================
-    // EVENTOS
-    // ============================================
     document.getElementById('saveUser').addEventListener('click', () => {
       userId = document.getElementById('userInput').value.trim();
       if (userId) {
         localStorage.setItem('chat_user_id', userId);
-        document.getElementById('currentUser').textContent = "Usuário: " + userId;
+        document.getElementById('currentUser').textContent = "Usuário / User: " + userId;
       }
     });
 
@@ -178,43 +160,39 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ user_id: userId || 'anon', message: text })
         });
-        
-        const { request_id } = await res.json();
 
-        // 2. Faz polling no Cenário 2
-        let attempts = 0;
-        const maxAttempts = 12; // 120 segundos total (12 × 10s)
-        
-        const interval = setInterval(async () => {
-          attempts++;
-          
-          // Consulta status via GET
-          const statusRes = await fetch(
-            `${WEBHOOK_RESPONSE}?request_id=${request_id}`
-          );
-          const statusData = await statusRes.json();
-          
-          if (statusData.status === 'completed') {
-            // 3. Atualiza mensagem quando pronto
-            waitingBubble.innerHTML = marked.parse(statusData.result);
-            clearInterval(interval);
+        const data = await res.json();
+
+        // 2. Se veio request_id, inicia polling (Cenário 2)
+        if (data.request_id) {
+          const requestId = data.request_id;
+          let attempts = 0;
+          const maxAttempts = 12; // 12 tentativas (120s total)
+          const interval = setInterval(async () => {
+            attempts++;
+            const statusRes = await fetch(`${WEBHOOK_RESPONSE}?request_id=${requestId}`);
+            const statusData = await statusRes.json();
+
+            if (statusData.status === 'completed') {
+              waitingBubble.innerHTML = marked.parse(statusData.response || "");
+              clearInterval(interval);
             } else if (statusData.status === 'error') {
-            waitingBubble.textContent = '❌ Erro: ' + (statusData.error || 'desconhecido');
-            clearInterval(interval);
-          } else if (attempts >= maxAttempts) {
-            waitingBubble.textContent = '⏱️ Timed out. Try again';
-            clearInterval(interval);
-          }
-        }, 10000); // Verifica a cada 10 segundos
-
+              waitingBubble.textContent = '❌ Erro / Error: ' + (statusData.error || 'desconhecido / unknown');
+              clearInterval(interval);
+            } else if (attempts >= maxAttempts) {
+              waitingBubble.textContent = '⏱️ Tempo limite excedido (120s) / Timeout exceeded (120s). Tente novamente / Try again.';
+              clearInterval(interval);
+            }
+          }, 10000); // verifica a cada 10 segundos
+        } else {
+          // 3. Se não veio request_id, fluxo finalizou direto
+          waitingBubble.innerHTML = marked.parse(data.response || data.result || "✔️ Finalizado / Completed");
+        }
       } catch (err) {
-        waitingBubble.textContent = '❌ Erro ao processar: ' + err.message;
+        waitingBubble.textContent = '❌ Erro ao processar / Error processing: ' + err.message;
       }
     });
 
-    // ============================================
-    // FUNÇÕES
-    // ============================================
     function appendMessage(who, text, isMarkdown = false) {
       const div = document.createElement('div');
       div.className = `bubble ${who}`;
@@ -226,5 +204,3 @@
   </script>
 </body>
 </html>
-
-
