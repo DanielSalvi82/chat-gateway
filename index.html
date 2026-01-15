@@ -135,8 +135,8 @@
     // ============================================
     // CONFIGURAÇÃO - SUBSTITUA COM SEUS WEBHOOKS
     // ============================================
-    const WEBHOOK_REQUEST = "https://hook.make.com/URL_DO_CENARIO_1"; // Webhook do Cenário 1 (Recebe e processa)
-    const WEBHOOK_RESPONSE = "https://hook.make.com/URL_DO_CENARIO_2"; // Webhook do Cenário 2 (Consulta status)
+    const WEBHOOK_REQUEST = "https://hook.us2.make.com/zdh65fxga487rr7a4rlnwspoefard0o5"; // Webhook do Cenário 1 (Recebe e processa)
+    const WEBHOOK_RESPONSE = "https://hook.us2.make.com/j515ihtagyebly4l0mbuo36kch4zo9b8"; // Webhook do Cenário 2 (Consulta status)
     
     // ============================================
     // VARIÁVEIS GLOBAIS
@@ -169,7 +169,7 @@
 
       appendMessage('me', text);
       document.getElementById('messageInput').value = '';
-      const waitingBubble = appendMessage('you', '⏰ Aguarde, estou planejando sua viagem...');
+      const waitingBubble = appendMessage('you', '⏰');
 
       try {
         // 1. Envia mensagem para Cenário 1
@@ -194,7 +194,7 @@
           );
           const statusData = await statusRes.json();
           
-          if (statusData.status === 'completed') {
+          if (statusData.status === 'complete') {
             // 3. Atualiza mensagem quando pronto
             waitingBubble.innerHTML = marked.parse(statusData.result);
             clearInterval(interval);
@@ -202,7 +202,7 @@
             waitingBubble.textContent = '⏱️ Tempo limite excedido (60s). Tente novamente.';
             clearInterval(interval);
           }
-        }, 5000); // Verifica a cada 5 segundos
+        }, 10000); // Verifica a cada 10 segundos
 
       } catch (err) {
         waitingBubble.textContent = '❌ Erro ao processar: ' + err.message;
@@ -223,3 +223,4 @@
   </script>
 </body>
 </html>
+
