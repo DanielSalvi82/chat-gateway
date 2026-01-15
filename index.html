@@ -137,15 +137,12 @@
     const WEBHOOK_REQUEST = "https://hook.us2.make.com/zdh65fxga487rr7a4rlnwspoefard0o5"; // Cenário 1
     const WEBHOOK_RESPONSE = "https://hook.us2.make.com/j515ihtagyebly4l0mbuo36kch4zo9b8"; // Cenário 2 (polling)
 
-    // Se quiser ver debug bruto na UI, coloque true; para produção deixe false
+    // Delay antes de iniciar polling (em ms)
+    const POLLING_START_DELAY_MS = 30000; // 30s
+    const POLLING_INTERVAL_MS = 10000; // 10s
+    const POLLING_MAX_ATTEMPTS = 12; // 12 tentativas após início
+
     const SHOW_DEBUG = false;
-
-    // Delay antes de iniciar polling (em milissegundos)
-    const POLLING_START_DELAY_MS = 30000; // 30 segundos
-
-    // Intervalo de polling e tentativas
-    const POLLING_INTERVAL_MS = 10000; // 10 segundos entre tentativas
-    const POLLING_MAX_ATTEMPTS = 12; // total 12 tentativas (120s) após o início do polling
 
     // ============================
     // Inicialização
@@ -165,7 +162,7 @@
     });
 
     // ============================
-    // Helpers: appendMessage + debug
+    // Helpers
     // ============================
     function appendMessage(who, htmlContent) {
       const div = document.createElement('div');
@@ -191,26 +188,21 @@
     // ============================
     function tryExtractJsonFromText(rawText) {
       if (!rawText || !rawText.trim()) return null;
-      try {
-        return JSON.parse(rawText);
-      } catch (e) {}
+      try { return JSON.parse(rawText); } catch (e) {}
 
       const firstBrace = rawText.indexOf('{');
       const lastBrace = rawText.lastIndexOf('}');
       if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
         const candidate = rawText.substring(firstBrace, lastBrace + 1);
-        try {
-          return JSON.parse(candidate);
-        } catch (e) {}
+        try { return JSON.parse(candidate); } catch (e) {}
       }
 
       const match = rawText.match(/\{[\s\S]*\}/);
       if (match) {
-        try {
-          return JSON.parse(match[0]);
-        } catch (e) {}
+        try { return JSON.parse(match[0]); } catch (e) {}
       }
 
+      // fallback: extract "reply" value via regex
       const replyRegex = /"reply"\s*:\s*"([\s\S]*?)"\s*(,|\})/i;
       const replyMatch = rawText.match(replyRegex);
       if (replyMatch && replyMatch[1]) {
@@ -219,23 +211,17 @@
         return { reply: val };
       }
 
-      const replyRegexSingle = /'reply'\s*:\s*'([\s\S]*?)'\s*(,|\})/i;
-      const replyMatchSingle = rawText.match(replyRegexSingle);
-      if (replyMatchSingle && replyMatchSingle[1]) {
-        return { reply: replyMatchSingle[1] };
-      }
-
       return null;
     }
 
     // ============================
-    // extractTextFromPayload: robust recursive extractor
+    // Extrai texto útil de payloads variados
     // ============================
     function extractTextFromPayload(obj) {
       if (!obj) return null;
       if (typeof obj === 'string') return obj;
 
-      const keys = ['response', 'result', 'reply', 'message', 'text', 'body', 'content'];
+      const keys = ['status','response','result','reply','message','text','body','content'];
       for (const k of keys) {
         if (obj[k]) {
           if (typeof obj[k] === 'string') return obj[k];
@@ -246,7 +232,7 @@
         }
       }
 
-      const arrayKeys = ['bundle', 'collection', 'items', 'data', 'results'];
+      const arrayKeys = ['bundle','collection','items','data','results'];
       for (const k of arrayKeys) {
         if (Array.isArray(obj[k]) && obj[k].length > 0) {
           const nested = extractTextFromPayload(obj[k][0]);
@@ -267,30 +253,72 @@
     }
 
     // ============================
-    // robust fetch json: returns { parsed, rawText, contentType }
+    // Robust fetch json
     // ============================
     async function robustFetchJson(response) {
       const contentType = response.headers.get('content-type') || '';
       const rawText = await response.text();
       let parsed = null;
-      try {
-        parsed = JSON.parse(rawText);
-      } catch (e) {
-        parsed = tryExtractJsonFromText(rawText);
-      }
+      try { parsed = JSON.parse(rawText); } catch (e) { parsed = tryExtractJsonFromText(rawText); }
       return { parsed, rawText, contentType };
     }
 
     // ============================
-    // Unescape common escaped sequences in strings
+    // Normaliza texto "quebrado" (ex.: O\nl\ná -> Olá)
+    // Preserva quebras de parágrafo e listas.
     // ============================
-    function unescapeString(s) {
+    function normalizeBrokenText(s) {
       if (!s || typeof s !== 'string') return s;
-      return s.replace(/\\"/g, '"').replace(/\\n/g, '\n').replace(/\\r/g, '\r');
+
+      // 1) Unescape common sequences
+      let t = s.replace(/\\"/g, '"').replace(/\\r/g, '\r').replace(/\\t/g, '\t');
+
+      // 2) Se houver muitos casos de letra + newline + letra (ex: "O\nl\ná"), junta-os.
+      //    Substitui apenas quando newline separa letras sem espaço e sem formar palavras separadas.
+      //    Usa Unicode letters (inclui acentos).
+      t = t.replace(/([^\s\W\d_])\n(?=[^\s\W\d_])/gu, '$1');
+
+      // 3) Se existirem sequências de múltiplas quebras de linha, reduz para duas (parágrafo)
+      t = t.replace(/\n{3,}/g, '\n\n');
+
+      // 4) Remove quebras de linha que aparecem no meio de palavras por causa de wrap estranho:
+      //    Se houver letra + newline + letra e a palavra resultante tiver comprimento razoável, já foi juntada no passo 2.
+      //    Mantemos quebras de linha que seguem pontuação (.,!?), listas (-, *, 1.), headings (##).
+      //    Para segurança, também removemos quebras que aparecem entre letras e pontuação estranha:
+      t = t.replace(/([^\s\W\d_])\n([.,;:!?])/gu, '$1$2');
+
+      // 5) Trim
+      t = t.trim();
+
+      return t;
     }
 
     // ============================
-    // Inicia polling com parâmetros (função reutilizável)
+    // Detecta completion de forma robusta
+    // ============================
+    function isCompleted(statusField, rawText, parsedObj) {
+      // 1) se statusField existe, normaliza e compara
+      if (statusField !== undefined && statusField !== null) {
+        try {
+          const s = String(statusField).trim().toLowerCase();
+          if (s === 'completed' || s === 'done' || s === 'finished' || s === 'success') return true;
+        } catch (e) {}
+      }
+
+      // 2) se parsedObj tem result/reply não vazio, considera completo
+      if (parsedObj) {
+        const txt = extractTextFromPayload(parsedObj);
+        if (txt && String(txt).trim().length > 0) return true;
+      }
+
+      // 3) fallback: procura no rawText por "status":"completed" (caso venha com caracteres estranhos)
+      if (rawText && /"status"\s*:\s*"completed"/i.test(rawText)) return true;
+
+      return false;
+    }
+
+    // ============================
+    // Inicia polling (reutilizável)
     // ============================
     function startPolling(requestId, waitingBubble) {
       let attempts = 0;
@@ -299,26 +327,34 @@
         try {
           const statusRes = await fetch(`${WEBHOOK_RESPONSE}?request_id=${encodeURIComponent(requestId)}`);
           const { parsed: statusParsed, rawText: statusRaw } = await robustFetchJson(statusRes);
-          if (SHOW_DEBUG) appendDebug('Polling attempt ' + attempts + ' - raw:\n' + statusRaw);
+          if (SHOW_DEBUG) appendDebug('Polling raw:\n' + statusRaw);
 
-          const statusData = statusParsed || tryExtractJsonFromText(statusRaw);
-          const extracted = extractTextFromPayload(statusData);
-          const finalText = unescapeString(extracted || statusData?.response || statusData?.result || statusData?.reply || statusRaw || '');
+          // Detect completion robustamente
+          const completed = isCompleted(statusParsed?.status, statusRaw, statusParsed);
 
-          if (statusData && (statusData.status === 'completed' || statusData.status === 'done' || statusData.status === 'finished')) {
+          // Extrai texto útil
+          const extracted = extractTextFromPayload(statusParsed);
+          let finalText = extracted || statusParsed?.response || statusParsed?.result || statusParsed?.reply || statusRaw || '';
+
+          // Normaliza texto quebrado
+          finalText = normalizeBrokenText(finalText);
+
+          if (completed) {
+            // Renderiza Markdown formatado
             waitingBubble.innerHTML = marked.parse(finalText);
             clearInterval(interval);
             return;
           }
 
-          if (!statusData?.status && extracted) {
+          // Se não há status mas já temos conteúdo plausível, considera finalizado (compatibilidade)
+          if (!statusParsed?.status && extracted && String(extracted).trim().length > 0) {
             waitingBubble.innerHTML = marked.parse(finalText);
             clearInterval(interval);
             return;
           }
 
-          if (statusData && statusData.status === 'error') {
-            waitingBubble.textContent = '❌ Erro / Error: ' + (statusData.error || statusData.message || 'unknown');
+          if (statusParsed && statusParsed.status && String(statusParsed.status).toLowerCase().includes('error')) {
+            waitingBubble.textContent = '❌ Erro / Error: ' + (statusParsed.error || statusParsed.message || 'unknown');
             clearInterval(interval);
             return;
           }
@@ -340,6 +376,18 @@
     }
 
     // ============================
+    // robust fetch json helper for initial request
+    // ============================
+    async function initialRequest(body) {
+      const res = await fetch(WEBHOOK_REQUEST, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+      return robustFetchJson(res);
+    }
+
+    // ============================
     // Main submit handler
     // ============================
     document.getElementById('chatForm').addEventListener('submit', async (e) => {
@@ -352,66 +400,60 @@
       const waitingBubble = appendMessage('you', '⏳');
 
       try {
-        // 1) send to scenario 1
-        const res = await fetch(WEBHOOK_REQUEST, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ user_id: userId || 'anon', message: text })
-        });
-
-        const { parsed: dataParsed, rawText: dataRaw } = await robustFetchJson(res);
+        const { parsed: dataParsed, rawText: dataRaw } = await initialRequest({ user_id: userId || 'anon', message: text });
         if (SHOW_DEBUG) appendDebug('Cenário 1 - raw response:\n' + dataRaw);
         console.log('Cenário 1 raw:', dataRaw);
 
         const data = dataParsed || tryExtractJsonFromText(dataRaw);
 
-        // If data is null but raw text exists, try to extract reply via regex
+        // Se não parseou, mas rawText existe, tenta extrair reply e mostrar
         if (!data && dataRaw && dataRaw.trim()) {
           const fallback = tryExtractJsonFromText(dataRaw);
           if (fallback && (fallback.reply || fallback.response || fallback.result)) {
             const extracted = extractTextFromPayload(fallback);
-            const finalText = unescapeString(extracted || dataRaw);
+            const finalText = normalizeBrokenText(extracted || dataRaw);
             waitingBubble.innerHTML = marked.parse(finalText);
             return;
           }
-          // show raw text formatted as markdown
-          waitingBubble.innerHTML = marked.parse(unescapeString(dataRaw));
+          waitingBubble.innerHTML = marked.parse(normalizeBrokenText(dataRaw));
           return;
         }
 
-        // If data contains request_id -> start polling AFTER delay (silencioso)
+        // Se veio request_id -> inicia polling após delay silencioso
         if (data && data.request_id) {
           const requestId = data.request_id;
 
-          // inicia polling após o delay configurado (sem informar o usuário)
+          // Inicia polling após delay (silencioso)
           setTimeout(() => {
             startPolling(requestId, waitingBubble);
           }, POLLING_START_DELAY_MS);
-        } else {
-          // No request_id: direct response branch
-          const extracted = extractTextFromPayload(data);
-          if (extracted) {
-            const finalText = unescapeString(extracted);
-            waitingBubble.innerHTML = marked.parse(finalText);
-            return;
-          }
 
-          if (data) {
-            const fallbackText = data.response || data.result || data.reply || data.body || null;
-            if (fallbackText) {
-              const final = typeof fallbackText === 'string' ? unescapeString(fallbackText) : extractTextFromPayload(fallbackText);
-              if (final) {
-                waitingBubble.innerHTML = marked.parse(final);
-                return;
-              }
+          return;
+        }
+
+        // Sem request_id: resposta direta
+        const extracted = extractTextFromPayload(data);
+        if (extracted) {
+          const finalText = normalizeBrokenText(extracted);
+          waitingBubble.innerHTML = marked.parse(finalText);
+          return;
+        }
+
+        if (data) {
+          const fallbackText = data.response || data.result || data.reply || data.body || null;
+          if (fallbackText) {
+            const final = typeof fallbackText === 'string' ? normalizeBrokenText(fallbackText) : normalizeBrokenText(extractTextFromPayload(fallbackText));
+            if (final) {
+              waitingBubble.innerHTML = marked.parse(final);
+              return;
             }
           }
+        }
 
-          if (dataRaw && dataRaw.trim()) {
-            waitingBubble.innerHTML = marked.parse(unescapeString(dataRaw));
-          } else {
-            waitingBubble.textContent = "⚠️ Nenhum conteúdo retornado / No content returned";
-          }
+        if (dataRaw && dataRaw.trim()) {
+          waitingBubble.innerHTML = marked.parse(normalizeBrokenText(dataRaw));
+        } else {
+          waitingBubble.textContent = "⚠️ Nenhum conteúdo retornado / No content returned";
         }
       } catch (err) {
         console.error('Erro geral:', err);
