@@ -186,7 +186,13 @@
           }, 10000); // verifica a cada 10 segundos
         } else {
           // 3. Se não veio request_id, fluxo finalizou direto
-          waitingBubble.innerHTML = marked.parse(data.response || data.result || "✔️ Finalizado / Completed");
+          if (data.response) {
+            waitingBubble.innerHTML = marked.parse(data.response);
+          } else if (data.result) {
+            waitingBubble.innerHTML = marked.parse(data.result);
+          } else {
+            waitingBubble.textContent = "⚠️ Nenhum conteúdo retornado / No content returned";
+          }
         }
       } catch (err) {
         waitingBubble.textContent = '❌ Erro ao processar / Error processing: ' + err.message;
