@@ -1,8 +1,8 @@
 <!DOCTYPE html>
 <html lang="pt">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Chat Gateway</title>
   <style>
     body {
@@ -73,6 +73,16 @@
       border: 1px solid #ccc;
       align-self: flex-start;
     }
+    .debug {
+      background: #f7f7f7;
+      color: #333;
+      font-size: 12px;
+      border-left: 3px solid #999;
+      padding: 8px;
+      margin: 6px;
+      max-width: 90%;
+      white-space: pre-wrap;
+    }
     #chatForm {
       display: flex;
       padding: 10px;
@@ -96,38 +106,44 @@
       cursor: pointer;
       font-weight: bold;
     }
+    .meta {
+      font-size: 11px;
+      color: #666;
+      margin-left: 8px;
+    }
   </style>
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 </head>
 <body>
-  <!-- Cabeçalho bilíngue -->
   <div id="header">
     👋 Bem-vindo ao Chat Gateway — configure seu UserID abaixo<br>
     👋 Welcome to Chat Gateway — set your UserID below
   </div>
 
-  <!-- Configuração do usuário -->
   <div id="userConfig">
     <input id="userInput" type="text" placeholder="Digite seu UserID / Enter your UserID" />
     <button id="saveUser">Salvar / Save</button>
     <span id="currentUser"></span>
   </div>
 
-  <!-- Área de mensagens -->
   <div id="messages"></div>
 
-  <!-- Formulário de envio -->
   <form id="chatForm">
     <input id="messageInput" type="text" placeholder="Digite sua mensagem... / Type your message..." />
     <button type="submit">➤</button>
   </form>
 
   <script>
+    // ============================
+    // CONFIGURAÇÃO - substitua pelos seus webhooks
+    // ============================
     const WEBHOOK_REQUEST = "https://hook.us2.make.com/zdh65fxga487rr7a4rlnwspoefard0o5"; // Cenário 1
-    const WEBHOOK_RESPONSE = "https://hook.us2.make.com/j515ihtagyebly4l0mbuo36kch4zo9b8"; // Cenário 2
+    const WEBHOOK_RESPONSE = "https://hook.us2.make.com/j515ihtagyebly4l0mbuo36kch4zo9b8"; // Cenário 2 (polling)
 
+    // ============================
+    // Inicialização
+    // ============================
     let userId = localStorage.getItem('chat_user_id') || '';
-
     if (userId) {
       document.getElementById('userInput').value = userId;
       document.getElementById('currentUser').textContent = "Usuário / User: " + userId;
@@ -141,6 +157,113 @@
       }
     });
 
+    // ============================
+    // Helpers: appendMessage + debug
+    // ============================
+    function appendMessage(who, text, isMarkdown = false) {
+      const div = document.createElement('div');
+      div.className = `bubble ${who}`;
+      div.innerHTML = isMarkdown ? marked.parse(text) : text;
+      document.getElementById('messages').appendChild(div);
+      document.getElementById('messages').scrollTop = document.getElementById('messages').scrollHeight;
+      return div;
+    }
+
+    function appendDebug(text) {
+      const div = document.createElement('div');
+      div.className = 'debug';
+      div.textContent = text;
+      document.getElementById('messages').appendChild(div);
+      document.getElementById('messages').scrollTop = document.getElementById('messages').scrollHeight;
+      return div;
+    }
+
+    // ============================
+    // Helper: tenta extrair texto útil do payload (procura por response/result/reply/body.reply etc.)
+    // Retorna string ou null
+    // ============================
+    function extractTextFromPayload(obj) {
+      if (!obj) return null;
+
+      // Se for string simples
+      if (typeof obj === 'string') {
+        return obj;
+      }
+
+      // Campos diretos preferenciais
+      const directKeys = ['response', 'result', 'reply', 'message', 'text', 'body'];
+      for (const k of directKeys) {
+        if (obj[k]) {
+          // Se body for objeto, recursivamente extrai
+          if (typeof obj[k] === 'string') return obj[k];
+          if (typeof obj[k] === 'object') {
+            // body pode conter reply
+            const nested = extractTextFromPayload(obj[k]);
+            if (nested) return nested;
+          }
+        }
+      }
+
+      // Se houver um campo chamado 'body' que é stringified JSON, tenta parsear
+      if (obj.body && typeof obj.body === 'string') {
+        try {
+          const parsed = JSON.parse(obj.body);
+          const nested = extractTextFromPayload(parsed);
+          if (nested) return nested;
+        } catch (e) {
+          // não é JSON, pode ser texto
+          return obj.body;
+        }
+      }
+
+      // Se houver arrays (bundle, collection, items), tenta inspecionar o primeiro elemento
+      const arrayKeys = ['bundle', 'collection', 'items', 'data', 'results'];
+      for (const k of arrayKeys) {
+        if (Array.isArray(obj[k]) && obj[k].length > 0) {
+          // tenta extrair do primeiro elemento
+          const nested = extractTextFromPayload(obj[k][0]);
+          if (nested) return nested;
+        }
+      }
+
+      // Busca recursiva por chaves que contenham 'reply' ou 'response'
+      for (const key of Object.keys(obj)) {
+        try {
+          const val = obj[key];
+          if (typeof val === 'string') {
+            // se o valor for longo e plausível, retorna
+            if (val.length > 10) return val;
+          } else if (typeof val === 'object') {
+            const nested = extractTextFromPayload(val);
+            if (nested) return nested;
+          }
+        } catch (e) {
+          // ignore
+        }
+      }
+
+      return null;
+    }
+
+    // ============================
+    // Função para obter JSON com robustez: tenta json(), se falhar tenta parse do texto
+    // ============================
+    async function robustFetchJson(response) {
+      const contentType = response.headers.get('content-type') || '';
+      const text = await response.text();
+      // tenta parse JSON
+      try {
+        const parsed = JSON.parse(text);
+        return { parsed, rawText: text, contentType };
+      } catch (e) {
+        // não é JSON, tenta retornar texto cru
+        return { parsed: null, rawText: text, contentType };
+      }
+    }
+
+    // ============================
+    // Envio do formulário / lógica principal
+    // ============================
     document.getElementById('chatForm').addEventListener('submit', async (e) => {
       e.preventDefault();
       const text = document.getElementById('messageInput').value.trim();
@@ -151,62 +274,126 @@
       const waitingBubble = appendMessage('you', '⏰');
 
       try {
+        // 1) Envia para Cenário 1
         const res = await fetch(WEBHOOK_REQUEST, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ user_id: userId || 'anon', message: text })
         });
 
-        const data = await res.json();
+        // debug: status e headers
+        console.log('Cenário1 status:', res.status, res.statusText);
+        const { parsed, rawText, contentType } = await robustFetchJson(res);
 
-        if (data.request_id) {
-          // Polling
+        // mostra payload bruto para debug (visível na UI)
+        appendDebug('Cenário 1 - payload bruto:\n' + rawText);
+
+        // Se veio JSON parseado, usa parsed, senão tenta extrair do texto
+        const data = parsed || (() => {
+          // tenta extrair JSON dentro do texto (algumas plataformas retornam "Bundle ... Body { ... }")
+          try {
+            const maybe = rawText.match(/\{[\s\S]*\}$/);
+            if (maybe) return JSON.parse(maybe[0]);
+          } catch (e) { /* ignore */ }
+          return null;
+        })();
+
+        // Se não conseguiu parsear nada, mas o texto não é vazio, mostra o texto
+        if (!data && rawText && rawText.trim()) {
+          // Se o webhook retornou texto simples, mostra direto
+          waitingBubble.innerHTML = marked.parse(rawText);
+          return;
+        }
+
+        // Se data existe, checa request_id
+        if (data && data.request_id) {
+          // inicia polling
           const requestId = data.request_id;
           let attempts = 0;
-          const maxAttempts = 12;
+          const maxAttempts = 12; // 12 tentativas
+          const intervalMs = 10000; // 10s
           const interval = setInterval(async () => {
             attempts++;
-            const statusRes = await fetch(`${WEBHOOK_RESPONSE}?request_id=${requestId}`);
-            const statusData = await statusRes.json();
+            try {
+              const statusRes = await fetch(`${WEBHOOK_RESPONSE}?request_id=${encodeURIComponent(requestId)}`);
+              const { parsed: statusParsed, rawText: statusRaw } = await robustFetchJson(statusRes);
+              console.log('Polling payload raw:', statusRaw);
+              appendDebug('Polling payload bruto (tentativa ' + attempts + '):\n' + statusRaw);
 
-            if (statusData.status === 'completed') {
-              waitingBubble.innerHTML = marked.parse(
-                statusData.response || statusData.result || statusData.reply || ""
-              );
-              clearInterval(interval);
-            } else if (statusData.status === 'error') {
-              waitingBubble.textContent = '❌ Erro / Error: ' + (statusData.error || 'desconhecido / unknown');
-              clearInterval(interval);
-            } else if (attempts >= maxAttempts) {
-              waitingBubble.textContent = '⏱️ Tempo limite excedido (120s) / Timeout exceeded (120s). Tente novamente / Try again.';
-              clearInterval(interval);
+              const statusData = statusParsed || (() => {
+                try {
+                  const maybe = statusRaw.match(/\{[\s\S]*\}$/);
+                  if (maybe) return JSON.parse(maybe[0]);
+                } catch (e) {}
+                return null;
+              })();
+
+              // extrai texto útil
+              const extracted = extractTextFromPayload(statusData);
+              if (statusData && (statusData.status === 'completed' || statusData.status === 'done' || statusData.status === 'finished')) {
+                if (extracted) {
+                  waitingBubble.innerHTML = marked.parse(extracted);
+                } else {
+                  // se não encontrou texto, mostra payload bruto
+                  waitingBubble.textContent = '⚠️ Completed but no text found. See debug.';
+                }
+                clearInterval(interval);
+                return;
+              }
+
+              // Alguns flows retornam status 'processing' ou 'pending'
+              if (statusData && statusData.status === 'error') {
+                const errMsg = statusData.error || statusData.message || 'unknown error';
+                waitingBubble.textContent = '❌ Erro / Error: ' + errMsg;
+                clearInterval(interval);
+                return;
+              }
+
+              // Se encontrou texto mesmo sem status completed, considera como final (compatibilidade)
+              if (extracted && (statusData && !statusData.status)) {
+                waitingBubble.innerHTML = marked.parse(extracted);
+                clearInterval(interval);
+                return;
+              }
+
+              if (attempts >= maxAttempts) {
+                waitingBubble.textContent = '⏱️ Tempo limite excedido (120s) / Timeout exceeded (120s). Tente novamente / Try again.';
+                clearInterval(interval);
+                return;
+              }
+            } catch (pollErr) {
+              console.error('Erro no polling:', pollErr);
+              appendDebug('Erro no polling: ' + String(pollErr));
+              if (attempts >= maxAttempts) {
+                waitingBubble.textContent = '❌ Erro no polling / Polling error: ' + String(pollErr);
+                clearInterval(interval);
+              }
             }
-          }, 10000);
+          }, intervalMs);
         } else {
-          // Resposta direta
-          if (data.response) {
-            waitingBubble.innerHTML = marked.parse(data.response);
-          } else if (data.result) {
-            waitingBubble.innerHTML = marked.parse(data.result);
-          } else if (data.reply) {
-            waitingBubble.innerHTML = marked.parse(data.reply);
+          // 2) Sem request_id: resposta direta do webhook
+          // data pode ser null se não parseou; já tratamos rawText acima
+          const payload = data;
+          // extrai texto de vários formatos
+          const extracted = extractTextFromPayload(payload);
+          if (extracted) {
+            waitingBubble.innerHTML = marked.parse(extracted);
           } else {
-            waitingBubble.textContent = "⚠️ Nenhum conteúdo retornado / No content returned";
+            // tenta ver se rawText contém JSON-like e extrair reply
+            if (rawText && rawText.trim()) {
+              // já mostramos rawText no debug; aqui tentamos exibir rawText como fallback
+              waitingBubble.innerHTML = marked.parse(rawText);
+            } else {
+              waitingBubble.textContent = "⚠️ Nenhum conteúdo retornado / No content returned";
+            }
           }
         }
       } catch (err) {
+        console.error('Erro geral:', err);
+        appendDebug('Erro geral: ' + String(err));
         waitingBubble.textContent = '❌ Erro ao processar / Error processing: ' + err.message;
       }
     });
-
-    function appendMessage(who, text, isMarkdown = false) {
-      const div = document.createElement('div');
-      div.className = `bubble ${who}`;
-      div.innerHTML = isMarkdown ? marked.parse(text) : text;
-      document.getElementById('messages').appendChild(div);
-      document.getElementById('messages').scrollTop = document.getElementById('messages').scrollHeight;
-      return div;
-    }
   </script>
 </body>
 </html>
