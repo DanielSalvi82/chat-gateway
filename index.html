@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Chat Gateway</title>
+  <style>
+    body { font-family: "Segoe UI", Arial, sans-serif; margin:0; padding:0; display:flex; flex-direction:column; height:100vh; background:#ece5dd; }
+    #header { background:#075e54; color:white; padding:15px; font-weight:bold; text-align:center; }
+    #userConfig { background:#128c7e; padding:10px; display:flex; align-items:center; color:white; }
+    #userInput { flex:1; padding:8px; border:none; border-radius:5px; }
+    #saveUser { margin-left:10px; padding:8px 12px; border:none; background:#25d366; color:white; border-radius:5px; cursor:pointer; font-weight:bold; }
+    #currentUser { margin-left:15px; font-weight:bold; }
+    #messages { flex:1; overflow-y:auto; padding:15px; background:#ece5dd; display:flex; flex-direction:column; }
+    .bubble { max-width:70%; padding:10px 15px; margin:5px; border-radius:20px; word-wrap:break-word; font-size:14px; white-space:pre-wrap; }
+    .me { background:#dcf8c6; align-self:flex-end; }
+    .you { background:#fff; border:1px solid #ccc; align-self:flex-start; }
+    .debug { display:none; background:#f7f7f7; color:#333; font-size:12px; border-left:3px solid #999; padding:8px; margin:6px; max-width:90%; white-space:pre-wrap; }
+    #chatForm { display:flex; padding:10px; background:#f0f0f0; border-top:1px solid #ccc; align-items:center; }
+    #messageInput { flex:1; padding:10px; border:none; border-radius:20px; outline:none; }
+    #chatForm button { margin-left:10px; padding:10px 15px; border:none; background:#25d366; color:white; border-radius:50%; cursor:pointer; font-weight:bold; }
+    #statusBar { font-size:13px; color:#444; margin-left:12px; }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+</head>
+<body>
+  <div id="header">
+    👋 Bem-vindo ao Chat Gateway — configure seu UserID abaixo<br>
+    👋 Welcome to Chat Gateway — set your UserID below
+  </div>
+
+  <div id="userConfig">
+    <input id="userInput" type="text" placeholder="Digite seu UserID / Enter your UserID" />
+    <button id="saveUser">Salvar / Save</button>
+    <span id="currentUser"></span>
+  </div>
+
+  <div id="messages"></div>
+
+  <form id="chatForm">
+    <input id="messageInput" type="text" placeholder="Digite sua mensagem... / Type your message..." />
+    <button type="submit">➤</button>
+    <div id="statusBar"></div>
+  </form>
+
+  <script>
+    // CONFIGURAÇÃO - ajuste estes endpoints
+    const WEBHOOK_REQUEST = "https://hook.us2.make.com/zdh65fxga487rr7a4rlnwspoefard0o5"; // Make: inicia job
+    const WS_URL = "wss://seu-backend.example.com/ws"; // seu backend WebSocket
+    const STATUS_CHECK_URL = "https://seu-backend.example.com/status"; // opcional fallback
+    const CLIENT_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutos
+    const SHOW_DEBUG = false;
+
+    // UI helpers
+    const messagesEl = document.getElementById('messages');
+    const statusBar = document.getElementById('statusBar');
+
+    function appendMessage(who, htmlContent) {
+      const div = document.createElement('div');
+      div.className = `bubble ${who}`;
+      div.innerHTML = htmlContent;
+      messagesEl.appendChild(div);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+      return div;
+    }
+
+    function setStatus(text) {
+      statusBar.textContent = text || '';
+    }
+
+    // Preserve userId
+    let userId = localStorage.getItem('chat_user_id') || '';
+    if (userId) {
+      document.getElementById('userInput').value = userId;
+      document.getElementById('currentUser').textContent = "Usuário / User: " + userId;
+    }
+    document.getElementById('saveUser').addEventListener('click', () => {
+      userId = document.getElementById('userInput').value.trim();
+      if (userId) {
+        localStorage.setItem('chat_user_id', userId);
+        document.getElementById('currentUser').textContent = "Usuário / User: " + userId;
+      }
+    });
+
+    // Robust JSON extraction (kept from original)
+    function tryExtractJsonFromText(rawText) {
+      if (!rawText || !rawText.trim()) return null;
+      try { return JSON.parse(rawText); } catch (e) {}
+      const match = rawText.match(/\{[\s\S]*\}/);
+      if (match) {
+        try { return JSON.parse(match[0]); } catch (e) {}
+      }
+      return null;
+    }
+
+    function extractTextFromPayload(obj) {
+      if (!obj) return null;
+      if (typeof obj === 'string') return obj;
+      const keys = ['status','response','result','reply','message','text','body','content'];
+      for (const k of keys) {
+        if (obj[k]) {
+          if (typeof obj[k] === 'string') return obj[k];
+          if (typeof obj[k] === 'object') {
+            const nested = extractTextFromPayload(obj[k]);
+            if (nested) return nested;
+          }
+        }
+      }
+      for (const key of Object.keys(obj)) {
+        const val = obj[key];
+        if (typeof val === 'string' && val.length > 10) return val;
+        if (typeof val === 'object') {
+          const nested = extractTextFromPayload(val);
+          if (nested) return nested;
+        }
+      }
+      return null;
+    }
+
+    function normalizeBrokenText(s) {
+      if (!s || typeof s !== 'string') return s;
+      let t = s.replace(/\\"/g, '"').replace(/\\r/g, '\r').replace(/\\t/g, '\t');
+      t = t.replace(/([^\s\W\d_])\n(?=[^\s\W\d_])/gu, '$1');
+      t = t.replace(/\n{3,}/g, '\n\n');
+      t = t.replace(/([^\s\W\d_])\n([.,;:!?])/gu, '$1$2');
+      t = t.trim();
+      return t;
+    }
+
+    // WebSocket push
+    let ws = null;
+    let clientTimer = null;
+    const WS_RECONNECT_MS = 3000;
+
+    function connectWebSocket() {
+      if (!WS_URL) {
+        setStatus('WS_URL não configurado');
+        return;
+      }
+      if (ws && ws.readyState === WebSocket.OPEN) return;
+
+      setStatus('Conectando WebSocket...');
+      try {
+        ws = new WebSocket(WS_URL);
+
+        ws.addEventListener('open', () => {
+          setStatus('WebSocket conectado (push ativo)');
+          if (userId) {
+            try { ws.send(JSON.stringify({ type: 'identify', user_id: userId })); } catch(e) {}
+          }
+          // If we have a last_request_id, subscribe to it
+          const last = localStorage.getItem('last_request_id');
+          if (last) {
+            try { ws.send(JSON.stringify({ type: 'subscribe', request_id: last })); } catch(e) {}
+          }
+        });
+
+        ws.addEventListener('message', (evt) => {
+          try {
+            const payload = JSON.parse(evt.data);
+            if (payload.type === 'job_completed') {
+              clearClientTimeout();
+              const finalText = payload.response || '';
+              appendMessage('you', marked.parse(normalizeBrokenText(finalText)));
+              setStatus('Finalizado (push) — ' + (payload.request_id || ''));
+              const saved = localStorage.getItem('last_request_id');
+              if (saved && payload.request_id && saved === payload.request_id) localStorage.removeItem('last_request_id');
+            } else if (payload.type === 'job_timeout') {
+              clearClientTimeout();
+              appendMessage('you', '<div class="meta">⏱️ Tempo limite atingido no servidor</div>');
+              setStatus('Timeout no servidor');
+              localStorage.removeItem('last_request_id');
+            } else if (payload.type === 'job_update') {
+              setStatus('Atualização: ' + (payload.status || 'processing'));
+            } else if (payload.type === 'welcome') {
+              if (payload.message) appendMessage('you', '<div class="meta">' + escapeHtml(payload.message) + '</div>');
+            } else {
+              if (payload.message) appendMessage('you', '<div class="meta">' + escapeHtml(payload.message) + '</div>');
+            }
+          } catch (e) {
+            console.error('WS message parse error', e);
+          }
+        });
+
+        ws.addEventListener('close', () => {
+          setStatus('WebSocket desconectado. Tentando reconectar em ' + (WS_RECONNECT_MS/1000) + 's...');
+          setTimeout(connectWebSocket, WS_RECONNECT_MS);
+        });
+
+        ws.addEventListener('error', (err) => {
+          console.error('WS error', err);
+          ws.close();
+        });
+      } catch (err) {
+        console.error('WS connect error', err);
+        setTimeout(connectWebSocket, WS_RECONNECT_MS);
+      }
+    }
+
+    function startClientTimeout(requestId, waitingBubble) {
+      clearClientTimeout();
+      clientTimer = setTimeout(() => {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          try { ws.close(1000, 'Client timeout'); } catch(e) {}
+        }
+        waitingBubble.textContent = '⏱️ Tempo limite de 5 minutos atingido. Tente novamente.';
+        localStorage.removeItem('last_request_id');
+        setStatus('Timeout: operação excedeu 5 minutos');
+      }, CLIENT_TIMEOUT_MS);
+    }
+
+    function clearClientTimeout() {
+      if (clientTimer) {
+        clearTimeout(clientTimer);
+        clientTimer = null;
+      }
+    }
+
+    // Initial request (Make -> GitHub dispatch)
+    async function initialRequest(body) {
+      const res = await fetch(WEBHOOK_REQUEST, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+      const rawText = await res.text();
+      let parsed = null;
+      try { parsed = JSON.parse(rawText); } catch (e) { parsed = tryExtractJsonFromText(rawText); }
+      return { parsed, rawText };
+    }
+
+    // Form handler
+    document.getElementById('chatForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const text = document.getElementById('messageInput').value.trim();
+      if (!text) return;
+
+      appendMessage('me', escapeHtml(text));
+      document.getElementById('messageInput').value = '';
+      const waitingBubble = appendMessage('you', '⏳');
+
+      try {
+        const { parsed: dataParsed, rawText: dataRaw } = await initialRequest({ user_id: userId || 'anon', message: text });
+        if (SHOW_DEBUG) appendMessage('you', '<pre class="debug">' + escapeHtml(dataRaw) + '</pre>');
+
+        const data = dataParsed || tryExtractJsonFromText(dataRaw);
+
+        if (data && data.request_id) {
+          const requestId = data.request_id;
+          localStorage.setItem('last_request_id', requestId);
+          waitingBubble.innerHTML = '⏳ Requisição aceita — request_id: <b>' + escapeHtml(requestId) + '</b>. Aguardando resposta (push).';
+          setStatus('Aguardando resposta (push) — request_id: ' + requestId);
+          connectWebSocket();
+          // subscribe via WS if connected
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            try { ws.send(JSON.stringify({ type: 'subscribe', request_id: requestId })); } catch(e) {}
+          }
+          startClientTimeout(requestId, waitingBubble);
+          return;
+        }
+
+        // Direct response branch
+        const extracted = extractTextFromPayload(data);
+        if (extracted) {
+          const finalText = normalizeBrokenText(extracted);
+          waitingBubble.innerHTML = marked.parse(finalText);
+          setStatus('');
+          return;
+        }
+
+        if (dataRaw && dataRaw.trim()) {
+          waitingBubble.innerHTML = marked.parse(normalizeBrokenText(dataRaw));
+          setStatus('');
+        } else {
+          waitingBubble.textContent = "⚠️ Nenhum conteúdo retornado / No content returned";
+          setStatus('');
+        }
+      } catch (err) {
+        console.error('Erro geral:', err);
+        const waitingBubbleEl = document.querySelector('.bubble.you:last-child');
+        if (waitingBubbleEl) waitingBubbleEl.textContent = '❌ Erro ao processar / Error processing: ' + err.message;
+        setStatus('');
+      }
+    });
+
+    // Optional manual status check
+    async function checkStatusManual() {
+      const requestId = localStorage.getItem('last_request_id');
+      if (!requestId) {
+        setStatus('Nenhum request_id salvo. Envie uma mensagem primeiro.');
+        return;
+      }
+      setStatus('Verificando status para ' + requestId + ' ...');
+      try {
+        const res = await fetch(STATUS_CHECK_URL + '?request_id=' + encodeURIComponent(requestId));
+        if (!res.ok) {
+          setStatus('Erro ao checar status: ' + res.status);
+          return;
+        }
+        const data = await res.json();
+        if (data.status && data.status.toLowerCase() === 'completed') {
+          appendMessage('you', marked.parse(data.response || data.result || data.reply || ''));
+          setStatus('Finalizado');
+          localStorage.removeItem('last_request_id');
+          clearClientTimeout();
+        } else {
+          setStatus('Status atual: ' + (data.status || 'processing'));
+        }
+      } catch (err) {
+        setStatus('Erro ao checar status: ' + err.message);
+      }
+    }
+
+    // Expose manual check for debugging
+    window.checkStatusManual = checkStatusManual;
+
+    // Helper
+    function escapeHtml(unsafe) {
+      return String(unsafe)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+    }
+
+    // Auto-connect WS on load if last_request_id exists
+    window.addEventListener('load', () => {
+      const last = localStorage.getItem('last_request_id');
+      if (last) {
+        connectWebSocket();
+        setStatus('Aguardando resposta (push) — request_id: ' + last);
+      }
+    });
+  </script>
+</body>
+</html>
