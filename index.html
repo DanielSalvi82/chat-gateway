@@ -15,13 +15,11 @@
     .bubble { max-width:70%; padding:10px 15px; margin:5px; border-radius:20px; word-wrap:break-word; font-size:14px; white-space:pre-wrap; }
     .me { background:#dcf8c6; align-self:flex-end; }
     .you { background:#fff; border:1px solid #ccc; align-self:flex-start; }
-    .meta { font-size:12px; color:#666; margin-top:6px; }
     .debug { display:none; background:#f7f7f7; color:#333; font-size:12px; border-left:3px solid #999; padding:8px; margin:6px; max-width:90%; white-space:pre-wrap; }
     #chatForm { display:flex; padding:10px; background:#f0f0f0; border-top:1px solid #ccc; align-items:center; }
     #messageInput { flex:1; padding:10px; border:none; border-radius:20px; outline:none; }
     #chatForm button { margin-left:10px; padding:10px 15px; border:none; background:#25d366; color:white; border-radius:50%; cursor:pointer; font-weight:bold; }
     #statusBar { font-size:13px; color:#444; margin-left:12px; }
-    #smallNote { font-size:12px; color:#333; margin-left:12px; }
   </style>
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 </head>
@@ -40,24 +38,18 @@
   <div id="messages"></div>
 
   <form id="chatForm">
-    <input id="messageInput" type="text" placeholder="Digite sua mensagem... / Type your message..." autocomplete="off" />
+    <input id="messageInput" type="text" placeholder="Digite sua mensagem... / Type your message..." />
     <button type="submit">➤</button>
     <div id="statusBar"></div>
   </form>
 
   <script>
-    /**************************************************************************
-     * CONFIGURAÇÃO - ajuste estes endpoints e repositório raw se usar polling
-     *
-     * WEBHOOK_REQUEST: Make webhook que inicia o workflow (recebe client_payload)
-     * WS_URL: endpoint WebSocket do seu backend (opcional). Se vazio, polling será usado.
-     * OWNER/REPO/BRANCH: usados para montar URL raw do GitHub status/<request_id>.json
-     **************************************************************************/
+    // CONFIGURAÇÃO - ajuste estes endpoints
     const WEBHOOK_REQUEST = "https://hook.us2.make.com/zdh65fxga487rr7a4rlnwspoefard0o5"; // Make: inicia job
-    const WS_URL = ""; // ex: "wss://seu-backend.example.com/ws" - deixe vazio se não usar WebSocket
-    const OWNER = "seu-user-ou-org";      // ex: 'DanielSalvi82'
-    const REPO = "seu-repo";              // ex: 'travel_Agent_API_call'
-    const BRANCH = "main";                // branch onde está a pasta status
+    const WS_URL = ""; // opcional, não usado aqui
+    const OWNER = 'seu-user-ou-org';      // ex: 'DanielSalvi82'
+    const REPO = 'seu-repo';              // ex: 'travel_Agent_API_call'
+    const BRANCH = 'main';                // branch onde está a pasta status
     const DEFAULT_POLL_INTERVAL_MS = 3000; // intervalo padrão entre polls
     const DEFAULT_MAX_ATTEMPTS = 60;       // limite de polls antes de timeout
     const CLIENT_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutos client-side timeout
@@ -93,12 +85,39 @@
       }
     });
 
-    // Utilities
-    function escapeHtml(s) {
-      return String(s)
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;');
+    // Robust JSON extraction (kept from original)
+    function tryExtractJsonFromText(rawText) {
+      if (!rawText || !rawText.trim()) return null;
+      try { return JSON.parse(rawText); } catch (e) {}
+      const match = rawText.match(/\{[\s\S]*\}/);
+      if (match) {
+        try { return JSON.parse(match[0]); } catch (e) {}
+      }
+      return null;
+    }
+
+    function extractTextFromPayload(obj) {
+      if (!obj) return null;
+      if (typeof obj === 'string') return obj;
+      const keys = ['status','response','result','reply','message','text','body','content'];
+      for (const k of keys) {
+        if (obj[k]) {
+          if (typeof obj[k] === 'string') return obj[k];
+          if (typeof obj[k] === 'object') {
+            const nested = extractTextFromPayload(obj[k]);
+            if (nested) return nested;
+          }
+        }
+      }
+      for (const key of Object.keys(obj)) {
+        const val = obj[key];
+        if (typeof val === 'string' && val.length > 10) return val;
+        if (typeof val === 'object') {
+          const nested = extractTextFromPayload(val);
+          if (nested) return nested;
+        }
+      }
+      return null;
     }
 
     function normalizeBrokenText(s) {
@@ -142,6 +161,7 @@
       const intervalMs = opts.intervalMs ?? DEFAULT_POLL_INTERVAL_MS;
       const maxAttempts = opts.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
       let attempts = 0;
+
       const url = rawStatusUrl(requestId);
 
       while (attempts < maxAttempts) {
@@ -149,7 +169,7 @@
         try {
           const data = await fetchJsonNoCache(url);
 
-          // respeitar poll_at se presente
+          // Se poll_at estiver presente, aguardar até o timestamp sugerido
           if (data.poll_at) {
             const pollAt = Date.parse(data.poll_at);
             if (!Number.isNaN(pollAt)) {
@@ -157,23 +177,26 @@
               if (pollAt > now) {
                 const waitMs = Math.min(pollAt - now, intervalMs);
                 await sleep(waitMs);
-                continue;
+                continue; // re-tentar após aguardar
               }
             }
           }
 
+          // Se status completed e tem resposta, retornar
           if (data.status === 'completed') {
             const best = extractBestResponse(data);
             if (best) {
               onUpdate({ status: 'completed', payload: data, text: best });
               return { ok: true, data };
             }
-            // completed mas sem texto: aguardar mais
+            // se completed mas sem texto, ainda aguardar mais um pouco
           }
 
+          // Se status diferente ou sem resposta ainda, chamar onUpdate com progresso parcial
           onUpdate({ status: data.status ?? 'pending', payload: data, text: extractBestResponse(data) ?? null });
 
         } catch (err) {
+          // 404 significa que o arquivo ainda não foi criado; apenas log e continuar
           if (err.status === 404) {
             onUpdate({ status: 'not_found', error: 'status file not found yet' });
           } else {
@@ -181,77 +204,28 @@
           }
         }
 
+        // aguardar antes do próximo poll
         await sleep(intervalMs);
       }
 
+      // timeout
       onUpdate({ status: 'timeout', error: 'max polling attempts reached' });
       return { ok: false, error: 'timeout' };
     }
 
-    // WebSocket fallback (if WS_URL configured)
-    let ws = null;
-    const WS_RECONNECT_MS = 3000;
-
-    function connectWebSocket() {
-      if (!WS_URL) return;
-      if (ws && ws.readyState === WebSocket.OPEN) return;
-
-      setStatus('Conectando WebSocket...');
-      try {
-        ws = new WebSocket(WS_URL);
-
-        ws.addEventListener('open', () => {
-          setStatus('WebSocket conectado (push ativo)');
-          if (userId) {
-            try { ws.send(JSON.stringify({ type: 'identify', user_id: userId })); } catch(e) {}
-          }
-          const last = localStorage.getItem('last_request_id');
-          if (last) {
-            try { ws.send(JSON.stringify({ type: 'subscribe', request_id: last })); } catch(e) {}
-          }
-        });
-
-        ws.addEventListener('message', (evt) => {
-          try {
-            const payload = JSON.parse(evt.data);
-            // payload expected: { type: 'job_completed'|'job_update'|'job_timeout', request_id, response, ... }
-            if (payload.type === 'job_completed') {
-              clearClientTimeout();
-              const finalText = payload.response || payload.response_text_clean || '';
-              appendMessage('you', marked.parse(normalizeBrokenText(finalText)));
-              setStatus('Finalizado (push) — ' + (payload.request_id || ''));
-              const saved = localStorage.getItem('last_request_id');
-              if (saved && payload.request_id && saved === payload.request_id) localStorage.removeItem('last_request_id');
-            } else if (payload.type === 'job_timeout') {
-              clearClientTimeout();
-              appendMessage('you', '<div class="meta">⏱️ Tempo limite atingido no servidor</div>');
-              setStatus('Timeout no servidor');
-              localStorage.removeItem('last_request_id');
-            } else if (payload.type === 'job_update') {
-              setStatus('Atualização: ' + (payload.status || 'processing'));
-            } else if (payload.type === 'welcome') {
-              if (payload.message) appendMessage('you', '<div class="meta">' + escapeHtml(payload.message) + '</div>');
-            } else {
-              if (payload.message) appendMessage('you', '<div class="meta">' + escapeHtml(payload.message) + '</div>');
-            }
-          } catch (e) {
-            console.error('WS message parse error', e);
-          }
-        });
-
-        ws.addEventListener('close', () => {
-          setStatus('WebSocket desconectado. Tentando reconectar em ' + (WS_RECONNECT_MS/1000) + 's...');
-          setTimeout(connectWebSocket, WS_RECONNECT_MS);
-        });
-
-        ws.addEventListener('error', (err) => {
-          console.error('WS error', err);
-          try { ws.close(); } catch(e) {}
-        });
-      } catch (err) {
-        console.error('WS connect error', err);
-        setTimeout(connectWebSocket, WS_RECONNECT_MS);
-      }
+    // Decision function: should we trigger the remote Fireworks proxy?
+    // IMPORTANT: this function decides whether the flow ends internally (no proxy, no polling)
+    // or triggers the proxy (proxy + polling). Adjust logic as needed.
+    function needsRemoteProxy(text) {
+      if (!text) return false;
+      const t = text.trim();
+      // Example rules (customize to your needs):
+      // - explicit command prefix "/remote" triggers proxy
+      // - very long messages trigger proxy
+      // - otherwise, process locally
+      if (t.startsWith('/remote')) return true;
+      if (t.length > 300) return true;
+      return false;
     }
 
     // Client-side timeout handling
@@ -271,7 +245,7 @@
       }
     }
 
-    // Submit flow: send to Make webhook and then either rely on push or polling
+    // Submit flow: decide local vs proxy
     document.getElementById('chatForm').addEventListener('submit', async (ev) => {
       ev.preventDefault();
       const text = document.getElementById('messageInput').value.trim();
@@ -285,17 +259,32 @@
       appendMessage('me', escapeHtml(text));
       document.getElementById('messageInput').value = '';
 
-      // create request_id
+      // Decide whether to process locally or call proxy
+      if (!needsRemoteProxy(text)) {
+        // Process locally (Cenário 1) — no proxy call, no polling
+        setStatus('Processando localmente (sem proxy)...');
+        try {
+          // Replace this with your actual local processing logic
+          const localResult = 'Resposta processada localmente: ' + text;
+          appendMessage('you', escapeHtml(localResult));
+          setStatus('Finalizado localmente (sem polling)');
+        } catch (err) {
+          appendMessage('you', `<div class="meta">Erro no processamento local: ${escapeHtml(String(err))}</div>`);
+          setStatus('Erro local');
+        }
+        return;
+      }
+
+      // Cenário 2: trigger Fireworks proxy and do polling
       const requestId = `${new Date().toISOString().replace(/[:.]/g,'')}-${Math.floor(Math.random()*10000)}`;
       localStorage.setItem('last_request_id', requestId);
 
-      // build client_payload expected by workflow
       const clientPayload = {
         request_id: requestId,
         prompt: JSON.stringify({ messages: [{ role: "user", content: text }] }),
         InputMessage: text,
         user_id: userId,
-        needs_polling: true
+        needs_polling: "true"
       };
 
       setStatus('Enviando requisição ao workflow...');
@@ -320,19 +309,10 @@
 
       setStatus('Workflow iniciado. Aguardando resposta...');
 
-      // If WS available, ensure connection and subscribe; otherwise start polling
-      if (WS_URL) {
-        connectWebSocket();
-        // send subscribe message once connected (if already open)
-        if (ws && ws.readyState === WebSocket.OPEN) {
-          try { ws.send(JSON.stringify({ type: 'subscribe', request_id: requestId })); } catch(e) {}
-        }
-      }
-
       // start client timeout
       startClientTimeout(requestId);
 
-      // Start polling as fallback (and also to show progress while waiting for push)
+      // Start polling for the status file created by the proxy
       (async () => {
         const result = await pollStatus(requestId, (update) => {
           if (update.status === 'not_found') {
@@ -342,19 +322,16 @@
           if (update.status === 'pending') {
             const preview = update.text ? (update.text.length > 300 ? update.text.slice(0,300) + '…' : update.text) : 'Processando…';
             setStatus('Processando (polling)…');
-            // show a small preview if available
             if (update.text) {
-              // replace last preview bubble if exists
               const lastPreview = document.getElementById('preview-' + requestId);
               if (lastPreview) lastPreview.remove();
-              const el = appendMessage('you', '<div id="preview-' + requestId + '" class="meta">Preview: ' + escapeHtml(preview) + '</div>');
+              appendMessage('you', '<div id="preview-' + requestId + '" class="meta">Preview: ' + escapeHtml(preview) + '</div>');
             }
             return;
           }
           if (update.status === 'completed') {
             clearClientTimeout();
             const payload = update.payload || {};
-            // prefer HTML if present
             if (payload.response_text_html) {
               appendMessage('you', payload.response_text_html);
             } else {
@@ -378,47 +355,26 @@
         }, { intervalMs: DEFAULT_POLL_INTERVAL_MS, maxAttempts: DEFAULT_MAX_ATTEMPTS });
 
         if (!result.ok) {
-          // if polling timed out and WS is available, keep waiting for push; otherwise show final timeout
-          if (!WS_URL) {
-            clearClientTimeout();
-            appendMessage('you', '<div class="meta">Nenhuma resposta recebida. Tente novamente mais tarde.</div>');
-            setStatus('Sem resposta');
-            localStorage.removeItem('last_request_id');
-          } else {
-            setStatus('Aguardando push via WebSocket (se disponível)...');
-          }
+          clearClientTimeout();
+          appendMessage('you', '<div class="meta">🔄 Nenhuma resposta recebida. Tente novamente mais tarde.</div>');
+          setStatus('Sem resposta');
+          localStorage.removeItem('last_request_id');
         }
       })();
     });
 
-    // Inicializar WebSocket se configurado
-    if (WS_URL) connectWebSocket();
-
-    // Se houver um last_request_id salvo ao carregar a página, retomar polling/subscrição
+    // If there's a pending request on load, resume polling (only relevant if proxy was triggered)
     (function resumePending() {
       const last = localStorage.getItem('last_request_id');
       if (!last) return;
       appendMessage('you', `<div class="meta">Retomando requisição pendente: ${escapeHtml(last)}</div>`);
       setStatus('Retomando requisição pendente...');
-      // subscribe via WS if available
-      if (WS_URL) {
-        connectWebSocket();
-        if (ws && ws.readyState === WebSocket.OPEN) {
-          try { ws.send(JSON.stringify({ type: 'subscribe', request_id: last })); } catch(e) {}
-        }
-      }
-      // start polling as fallback
-      startClientTimeout(last);
       (async () => {
         await pollStatus(last, (update) => {
           if (update.status === 'completed') {
-            clearClientTimeout();
             const payload = update.payload || {};
-            if (payload.response_text_html) {
-              appendMessage('you', payload.response_text_html);
-            } else {
-              appendMessage('you', marked.parse(normalizeBrokenText(update.text || '')));
-            }
+            const textResp = update.text || (payload.response && payload.response.text) || '';
+            appendMessage('you', marked.parse(normalizeBrokenText(textResp)));
             setStatus('Finalizado (retomado) — ' + last);
             localStorage.removeItem('last_request_id');
           } else {
