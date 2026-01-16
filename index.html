@@ -183,15 +183,11 @@
     }
 
     // Decision function: should we trigger the remote Fireworks proxy?
-    // IMPORTANT: this function decides whether the flow ends internally (no proxy, no polling)
-    // or triggers the proxy (proxy + polling). Adjust logic as needed.
+    // Adjust this function to your rules. If true -> proxy (Cenário 2). If false -> Cenário 1.
     function needsRemoteProxy(text) {
       if (!text) return false;
       const t = text.trim();
-      // Example rules (customize to your needs):
-      // - explicit command prefix "/remote" triggers proxy
-      // - very long messages trigger proxy
-      // - otherwise, process locally
+      // Example rules (customize):
       if (t.startsWith('/remote')) return true;
       if (t.length > 300) return true;
       return false;
@@ -241,21 +237,36 @@
 
         // Decide whether to process locally or call proxy
         if (!needsRemoteProxy(text)) {
-          // Process locally (Cenário 1) — no proxy call, no polling
-          setStatus('Processando localmente (sem proxy)...');
+          // CENÁRIO 1: enviar webhook minimal { message, user_id } to start process, NO polling
+          setStatus('Enviando webhook (cenário 1) para iniciar processo...');
+          const payload1 = { message: text, user_id: userId };
+          console.log('Cenário 1: POST payload', payload1);
+
           try {
-            // Replace this with your actual local processing logic
-            const localResult = 'Resposta processada localmente: ' + text;
-            appendMessage('you', escapeHtml(localResult));
-            setStatus('Finalizado localmente (sem polling)');
+            const resp = await fetch(WEBHOOK_REQUEST, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(payload1)
+            });
+            console.log('Cenário 1: webhook response', resp.status, resp.statusText);
+            if (!resp.ok) {
+              appendMessage('you', `<div class="meta">Erro ao chamar webhook (cenário 1): HTTP ${resp.status}</div>`);
+              setStatus('Erro ao chamar webhook (cenário 1)');
+              return;
+            }
+            // webhook chamado com sucesso; exibir confirmação e NÃO iniciar polling
+            appendMessage('you', `<div class="meta">Webhook (cenário 1) enviado com sucesso. Processo iniciado externamente.</div>`);
+            setStatus('Webhook enviado (cenário 1) — sem polling');
+            // Não iniciar polling; o processo é iniciado externamente
           } catch (err) {
-            appendMessage('you', `<div class="meta">Erro no processamento local: ${escapeHtml(String(err))}</div>`);
-            setStatus('Erro local');
+            console.error('Cenário 1: erro fetch', err);
+            appendMessage('you', `<div class="meta">Erro de rede ao chamar webhook (cenário 1): ${escapeHtml(String(err))}</div>`);
+            setStatus('Erro de rede (cenário 1)');
           }
           return;
         }
 
-        // Cenário 2: trigger Fireworks proxy and do polling
+        // CENÁRIO 2: trigger Fireworks proxy and do polling
         const requestId = `${new Date().toISOString().replace(/[:.]/g,'')}-${Math.floor(Math.random()*10000)}`;
         localStorage.setItem('last_request_id', requestId);
 
@@ -267,7 +278,7 @@
           needs_polling: "true"
         };
 
-        setStatus('Enviando requisição ao workflow...');
+        setStatus('Enviando requisição ao workflow (cenário 2)...');
 
         // POST to Make webhook (fire the workflow)
         try {
@@ -276,12 +287,14 @@
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(clientPayload)
           });
+          console.log('Cenário 2: webhook response', resp.status, resp.statusText);
           if (!resp.ok) {
             appendMessage('you', `<div class="meta">Erro ao iniciar workflow: HTTP ${resp.status}</div>`);
             setStatus('Erro ao iniciar workflow');
             return;
           }
         } catch (err) {
+          console.error('Cenário 2: erro fetch', err);
           appendMessage('you', `<div class="meta">Erro de rede ao iniciar workflow: ${escapeHtml(String(err))}</div>`);
           setStatus('Erro de rede');
           return;
@@ -345,10 +358,6 @@
 
       // Ensure single attachment of handlers
       form.addEventListener('submit', handleSubmit);
-      $('sendBtn').addEventListener('click', (ev) => {
-        // click should trigger submit; prevent double handling
-        // let the form submit handler handle the logic
-      });
 
       // Allow Enter to submit while preventing accidental form autocomplete
       $('messageInput').addEventListener('keydown', (e) => {
