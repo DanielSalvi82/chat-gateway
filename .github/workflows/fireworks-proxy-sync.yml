@@ -1,0 +1,107 @@
+name: Fireworks proxy sync (validate signature and save callback)
+
+on:
+  repository_dispatch:
+    types: [fireworks-callback]
+
+jobs:
+  apply-callback:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read client_payload
+        id: read
+        run: |
+          PAYLOAD_STR=$(jq -r '.client_payload.payload_string' "$GITHUB_EVENT_PATH")
+          SIG=$(jq -r '.client_payload.signature' "$GITHUB_EVENT_PATH")
+          NEEDS_POLLING=$(jq -r '.client_payload.needs_polling // "false"' "$GITHUB_EVENT_PATH")
+          echo "payload_str<<EOF" >> $GITHUB_OUTPUT
+          echo "$PAYLOAD_STR" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          echo "signature=$SIG" >> $GITHUB_OUTPUT
+          echo "needs_polling=$NEEDS_POLLING" >> $GITHUB_OUTPUT
+
+      - name: Validate signature
+        env:
+          SHARED_SECRET: ${{ secrets.SHARED_SECRET }}
+          RECEIVED_SIGNATURE: ${{ steps.read.outputs.signature }}
+          PAYLOAD_STRING: ${{ steps.read.outputs.payload_str }}
+        run: |
+          set -o pipefail
+          SIG_HEX=$(printf '%s' "$PAYLOAD_STRING" | openssl dgst -sha256 -hmac "$SHARED_SECRET" -binary | xxd -p -c 256)
+          EXPECTED="sha256=$SIG_HEX"
+          if [ "$EXPECTED" != "$RECEIVED_SIGNATURE" ]; then
+            echo "Invalid signature. Expected prefix: ${SIG_HEX:0:8}" >&2
+            exit 1
+          fi
+          echo "Signature valid (prefix): ${SIG_HEX:0:8}"
+
+      - name: Apply or save callback (respect needs_polling and write poll_at)
+        env:
+          NEEDS_POLLING: ${{ steps.read.outputs.needs_polling }}
+          PAYLOAD_STRING: ${{ steps.read.outputs.payload_str }}
+          GS_SCRIPT_URL: ${{ secrets.GS_SCRIPT_URL }}
+          GS_SCRIPT_KEY: ${{ secrets.GS_SCRIPT_KEY }}
+        run: |
+          REQ=$(printf '%s' "$PAYLOAD_STRING" | jq -r '.request_id')
+          FORMATTED=$(printf '%s' "$PAYLOAD_STRING" | jq -r '.response.formatted_text // .response.text // empty')
+          NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          POLL_AT=$(date -u -d "+30 seconds" +"%Y-%m-%dT%H:%M:%SZ")
+          mkdir -p status
+
+          if [ "$NEEDS_POLLING" = "true" ]; then
+            STATUS_JSON=$(jq -n \
+              --arg rid "$REQ" \
+              --arg status "completed" \
+              --arg createdAt "$NOW" \
+              --arg updatedAt "$NOW" \
+              --arg poll_at "$POLL_AT" \
+              --argjson timeout_seconds 180 \
+              --argjson poll_interval 20 \
+              --arg formatted "$FORMATTED" \
+              '{
+                request_id: $rid,
+                status: $status,
+                createdAt: $createdAt,
+                updatedAt: $updatedAt,
+                poll_at: $poll_at,
+                timeout_seconds: $timeout_seconds,
+                poll_interval: $poll_interval,
+                response: { text: $formatted }
+              }'
+            )
+            echo "$STATUS_JSON" > status/$REQ.json
+            git add status/$REQ.json
+            git commit -m "Save result for $REQ (needs_polling=true, poll_at=$POLL_AT)" || echo "no changes"
+            git push
+          else
+            STATUS_JSON=$(jq -n \
+              --arg rid "$REQ" \
+              --arg status "completed" \
+              --arg createdAt "$NOW" \
+              --arg updatedAt "$NOW" \
+              --arg formatted "$FORMATTED" \
+              '{
+                request_id: $rid,
+                status: $status,
+                createdAt: $createdAt,
+                updatedAt: $updatedAt,
+                response: { text: $formatted }
+              }'
+            )
+            echo "$STATUS_JSON" > status/$REQ.json
+            git add status/$REQ.json
+            git commit -m "Apply immediate result for $REQ (needs_polling=false)" || echo "no changes"
+            git push
+          fi
+
+          if [ -n "$GS_SCRIPT_URL" ]; then
+            GS_PAYLOAD=$(jq -n --arg rid "$REQ" --arg ts "$NOW" --arg text "$FORMATTED" --arg raw "$PAYLOAD_STRING" '{request_id:$rid, timestamp:$ts, response_text:$text, raw_payload:$raw}')
+            if [ -n "$GS_SCRIPT_KEY" ]; then
+              curl -s -X POST "$GS_SCRIPT_URL" -H "Content-Type: application/json" -H "X-Script-Key: $GS_SCRIPT_KEY" -d "$GS_PAYLOAD" || echo "GS post failed"
+            else
+              curl -s -X POST "$GS_SCRIPT_URL" -H "Content-Type: application/json" -d "$GS_PAYLOAD" || echo "GS post failed"
+            fi
+          fi
