@@ -15,11 +15,13 @@
     .bubble { max-width:70%; padding:10px 15px; margin:5px; border-radius:20px; word-wrap:break-word; font-size:14px; white-space:pre-wrap; }
     .me { background:#dcf8c6; align-self:flex-end; }
     .you { background:#fff; border:1px solid #ccc; align-self:flex-start; }
+    .meta { font-size:12px; color:#666; margin-top:6px; }
     .debug { display:none; background:#f7f7f7; color:#333; font-size:12px; border-left:3px solid #999; padding:8px; margin:6px; max-width:90%; white-space:pre-wrap; }
     #chatForm { display:flex; padding:10px; background:#f0f0f0; border-top:1px solid #ccc; align-items:center; }
     #messageInput { flex:1; padding:10px; border:none; border-radius:20px; outline:none; }
     #chatForm button { margin-left:10px; padding:10px 15px; border:none; background:#25d366; color:white; border-radius:50%; cursor:pointer; font-weight:bold; }
     #statusBar { font-size:13px; color:#444; margin-left:12px; }
+    #smallNote { font-size:12px; color:#333; margin-left:12px; }
   </style>
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 </head>
@@ -38,18 +40,27 @@
   <div id="messages"></div>
 
   <form id="chatForm">
-    <input id="messageInput" type="text" placeholder="Digite sua mensagem... / Type your message..." />
+    <input id="messageInput" type="text" placeholder="Digite sua mensagem... / Type your message..." autocomplete="off" />
     <button type="submit">➤</button>
     <div id="statusBar"></div>
   </form>
 
   <script>
-    // CONFIGURAÇÃO - ajuste estes endpoints
+    /**************************************************************************
+     * CONFIGURAÇÃO - ajuste estes endpoints e repositório raw se usar polling
+     *
+     * WEBHOOK_REQUEST: Make webhook que inicia o workflow (recebe client_payload)
+     * WS_URL: endpoint WebSocket do seu backend (opcional). Se vazio, polling será usado.
+     * OWNER/REPO/BRANCH: usados para montar URL raw do GitHub status/<request_id>.json
+     **************************************************************************/
     const WEBHOOK_REQUEST = "https://hook.us2.make.com/zdh65fxga487rr7a4rlnwspoefard0o5"; // Make: inicia job
-    const WS_URL = "wss://seu-backend.example.com/ws"; // seu backend WebSocket
-    const STATUS_CHECK_URL = "https://seu-backend.example.com/status"; // opcional fallback
-    const CLIENT_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutos
-    const SHOW_DEBUG = false;
+    const WS_URL = ""; // ex: "wss://seu-backend.example.com/ws" - deixe vazio se não usar WebSocket
+    const OWNER = "seu-user-ou-org";      // ex: 'DanielSalvi82'
+    const REPO = "seu-repo";              // ex: 'travel_Agent_API_call'
+    const BRANCH = "main";                // branch onde está a pasta status
+    const DEFAULT_POLL_INTERVAL_MS = 3000; // intervalo padrão entre polls
+    const DEFAULT_MAX_ATTEMPTS = 60;       // limite de polls antes de timeout
+    const CLIENT_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutos client-side timeout
 
     // UI helpers
     const messagesEl = document.getElementById('messages');
@@ -82,61 +93,107 @@
       }
     });
 
-    // Robust JSON extraction (kept from original)
-    function tryExtractJsonFromText(rawText) {
-      if (!rawText || !rawText.trim()) return null;
-      try { return JSON.parse(rawText); } catch (e) {}
-      const match = rawText.match(/\{[\s\S]*\}/);
-      if (match) {
-        try { return JSON.parse(match[0]); } catch (e) {}
-      }
-      return null;
-    }
-
-    function extractTextFromPayload(obj) {
-      if (!obj) return null;
-      if (typeof obj === 'string') return obj;
-      const keys = ['status','response','result','reply','message','text','body','content'];
-      for (const k of keys) {
-        if (obj[k]) {
-          if (typeof obj[k] === 'string') return obj[k];
-          if (typeof obj[k] === 'object') {
-            const nested = extractTextFromPayload(obj[k]);
-            if (nested) return nested;
-          }
-        }
-      }
-      for (const key of Object.keys(obj)) {
-        const val = obj[key];
-        if (typeof val === 'string' && val.length > 10) return val;
-        if (typeof val === 'object') {
-          const nested = extractTextFromPayload(val);
-          if (nested) return nested;
-        }
-      }
-      return null;
+    // Utilities
+    function escapeHtml(s) {
+      return String(s)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
     }
 
     function normalizeBrokenText(s) {
       if (!s || typeof s !== 'string') return s;
       let t = s.replace(/\\"/g, '"').replace(/\\r/g, '\r').replace(/\\t/g, '\t');
-      t = t.replace(/([^\s\W\d_])\n(?=[^\s\W\d_])/gu, '$1');
       t = t.replace(/\n{3,}/g, '\n\n');
-      t = t.replace(/([^\s\W\d_])\n([.,;:!?])/gu, '$1$2');
       t = t.trim();
       return t;
     }
 
-    // WebSocket push
+    // Polling helpers (raw GitHub URL)
+    function rawStatusUrl(requestId) {
+      return `https://raw.githubusercontent.com/${OWNER}/${REPO}/${BRANCH}/status/${encodeURIComponent(requestId)}.json`;
+    }
+
+    function sleep(ms) {
+      return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    async function fetchJsonNoCache(url) {
+      const resp = await fetch(url, { cache: 'no-store' });
+      if (!resp.ok) {
+        const err = new Error(`HTTP ${resp.status}`);
+        err.status = resp.status;
+        throw err;
+      }
+      return resp.json();
+    }
+
+    function extractBestResponse(data) {
+      if (!data) return null;
+      if (data.response_text_clean) return data.response_text_clean;
+      if (data.response_text_markdown) return data.response_text_markdown;
+      if (data.response && data.response.text) return data.response.text;
+      if (data.response_text) return data.response_text;
+      if (data.response_text_html) return data.response_text_html;
+      return null;
+    }
+
+    async function pollStatus(requestId, onUpdate, opts = {}) {
+      const intervalMs = opts.intervalMs ?? DEFAULT_POLL_INTERVAL_MS;
+      const maxAttempts = opts.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
+      let attempts = 0;
+      const url = rawStatusUrl(requestId);
+
+      while (attempts < maxAttempts) {
+        attempts++;
+        try {
+          const data = await fetchJsonNoCache(url);
+
+          // respeitar poll_at se presente
+          if (data.poll_at) {
+            const pollAt = Date.parse(data.poll_at);
+            if (!Number.isNaN(pollAt)) {
+              const now = Date.now();
+              if (pollAt > now) {
+                const waitMs = Math.min(pollAt - now, intervalMs);
+                await sleep(waitMs);
+                continue;
+              }
+            }
+          }
+
+          if (data.status === 'completed') {
+            const best = extractBestResponse(data);
+            if (best) {
+              onUpdate({ status: 'completed', payload: data, text: best });
+              return { ok: true, data };
+            }
+            // completed mas sem texto: aguardar mais
+          }
+
+          onUpdate({ status: data.status ?? 'pending', payload: data, text: extractBestResponse(data) ?? null });
+
+        } catch (err) {
+          if (err.status === 404) {
+            onUpdate({ status: 'not_found', error: 'status file not found yet' });
+          } else {
+            onUpdate({ status: 'error', error: err.message ?? String(err) });
+          }
+        }
+
+        await sleep(intervalMs);
+      }
+
+      onUpdate({ status: 'timeout', error: 'max polling attempts reached' });
+      return { ok: false, error: 'timeout' };
+    }
+
+    // WebSocket fallback (if WS_URL configured)
     let ws = null;
-    let clientTimer = null;
     const WS_RECONNECT_MS = 3000;
 
     function connectWebSocket() {
-      if (!WS_URL) {
-        setStatus('WS_URL não configurado');
-        return;
-      }
+      if (!WS_URL) return;
       if (ws && ws.readyState === WebSocket.OPEN) return;
 
       setStatus('Conectando WebSocket...');
@@ -148,7 +205,6 @@
           if (userId) {
             try { ws.send(JSON.stringify({ type: 'identify', user_id: userId })); } catch(e) {}
           }
-          // If we have a last_request_id, subscribe to it
           const last = localStorage.getItem('last_request_id');
           if (last) {
             try { ws.send(JSON.stringify({ type: 'subscribe', request_id: last })); } catch(e) {}
@@ -158,9 +214,10 @@
         ws.addEventListener('message', (evt) => {
           try {
             const payload = JSON.parse(evt.data);
+            // payload expected: { type: 'job_completed'|'job_update'|'job_timeout', request_id, response, ... }
             if (payload.type === 'job_completed') {
               clearClientTimeout();
-              const finalText = payload.response || '';
+              const finalText = payload.response || payload.response_text_clean || '';
               appendMessage('you', marked.parse(normalizeBrokenText(finalText)));
               setStatus('Finalizado (push) — ' + (payload.request_id || ''));
               const saved = localStorage.getItem('last_request_id');
@@ -189,7 +246,7 @@
 
         ws.addEventListener('error', (err) => {
           console.error('WS error', err);
-          ws.close();
+          try { ws.close(); } catch(e) {}
         });
       } catch (err) {
         console.error('WS connect error', err);
@@ -197,141 +254,179 @@
       }
     }
 
-    function startClientTimeout(requestId, waitingBubble) {
+    // Client-side timeout handling
+    let clientTimeoutHandle = null;
+    function startClientTimeout(requestId) {
       clearClientTimeout();
-      clientTimer = setTimeout(() => {
-        if (ws && ws.readyState === WebSocket.OPEN) {
-          try { ws.close(1000, 'Client timeout'); } catch(e) {}
-        }
-        waitingBubble.textContent = '⏱️ Tempo limite de 5 minutos atingido. Tente novamente.';
+      clientTimeoutHandle = setTimeout(() => {
+        appendMessage('you', '<div class="meta">⏱️ Tempo limite do cliente atingido. Tente novamente.</div>');
+        setStatus('Timeout cliente');
         localStorage.removeItem('last_request_id');
-        setStatus('Timeout: operação excedeu 5 minutos');
       }, CLIENT_TIMEOUT_MS);
     }
-
     function clearClientTimeout() {
-      if (clientTimer) {
-        clearTimeout(clientTimer);
-        clientTimer = null;
+      if (clientTimeoutHandle) {
+        clearTimeout(clientTimeoutHandle);
+        clientTimeoutHandle = null;
       }
     }
 
-    // Initial request (Make -> GitHub dispatch)
-    async function initialRequest(body) {
-      const res = await fetch(WEBHOOK_REQUEST, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body)
-      });
-      const rawText = await res.text();
-      let parsed = null;
-      try { parsed = JSON.parse(rawText); } catch (e) { parsed = tryExtractJsonFromText(rawText); }
-      return { parsed, rawText };
-    }
-
-    // Form handler
-    document.getElementById('chatForm').addEventListener('submit', async (e) => {
-      e.preventDefault();
+    // Submit flow: send to Make webhook and then either rely on push or polling
+    document.getElementById('chatForm').addEventListener('submit', async (ev) => {
+      ev.preventDefault();
       const text = document.getElementById('messageInput').value.trim();
       if (!text) return;
-
-      appendMessage('me', escapeHtml(text));
-      document.getElementById('messageInput').value = '';
-      const waitingBubble = appendMessage('you', '⏳');
-
-      try {
-        const { parsed: dataParsed, rawText: dataRaw } = await initialRequest({ user_id: userId || 'anon', message: text });
-        if (SHOW_DEBUG) appendMessage('you', '<pre class="debug">' + escapeHtml(dataRaw) + '</pre>');
-
-        const data = dataParsed || tryExtractJsonFromText(dataRaw);
-
-        if (data && data.request_id) {
-          const requestId = data.request_id;
-          localStorage.setItem('last_request_id', requestId);
-          waitingBubble.innerHTML = '⏳ Requisição aceita — request_id: <b>' + escapeHtml(requestId) + '</b>. Aguardando resposta (push).';
-          setStatus('Aguardando resposta (push) — request_id: ' + requestId);
-          connectWebSocket();
-          // subscribe via WS if connected
-          if (ws && ws.readyState === WebSocket.OPEN) {
-            try { ws.send(JSON.stringify({ type: 'subscribe', request_id: requestId })); } catch(e) {}
-          }
-          startClientTimeout(requestId, waitingBubble);
-          return;
-        }
-
-        // Direct response branch
-        const extracted = extractTextFromPayload(data);
-        if (extracted) {
-          const finalText = normalizeBrokenText(extracted);
-          waitingBubble.innerHTML = marked.parse(finalText);
-          setStatus('');
-          return;
-        }
-
-        if (dataRaw && dataRaw.trim()) {
-          waitingBubble.innerHTML = marked.parse(normalizeBrokenText(dataRaw));
-          setStatus('');
-        } else {
-          waitingBubble.textContent = "⚠️ Nenhum conteúdo retornado / No content returned";
-          setStatus('');
-        }
-      } catch (err) {
-        console.error('Erro geral:', err);
-        const waitingBubbleEl = document.querySelector('.bubble.you:last-child');
-        if (waitingBubbleEl) waitingBubbleEl.textContent = '❌ Erro ao processar / Error processing: ' + err.message;
-        setStatus('');
-      }
-    });
-
-    // Optional manual status check
-    async function checkStatusManual() {
-      const requestId = localStorage.getItem('last_request_id');
-      if (!requestId) {
-        setStatus('Nenhum request_id salvo. Envie uma mensagem primeiro.');
+      if (!userId) {
+        alert('Defina seu UserID antes de enviar (campo acima).');
         return;
       }
-      setStatus('Verificando status para ' + requestId + ' ...');
+
+      // show user message
+      appendMessage('me', escapeHtml(text));
+      document.getElementById('messageInput').value = '';
+
+      // create request_id
+      const requestId = `${new Date().toISOString().replace(/[:.]/g,'')}-${Math.floor(Math.random()*10000)}`;
+      localStorage.setItem('last_request_id', requestId);
+
+      // build client_payload expected by workflow
+      const clientPayload = {
+        request_id: requestId,
+        prompt: JSON.stringify({ messages: [{ role: "user", content: text }] }),
+        InputMessage: text,
+        user_id: userId,
+        needs_polling: true
+      };
+
+      setStatus('Enviando requisição ao workflow...');
+
+      // POST to Make webhook (fire the workflow)
       try {
-        const res = await fetch(STATUS_CHECK_URL + '?request_id=' + encodeURIComponent(requestId));
-        if (!res.ok) {
-          setStatus('Erro ao checar status: ' + res.status);
+        const resp = await fetch(WEBHOOK_REQUEST, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(clientPayload)
+        });
+        if (!resp.ok) {
+          appendMessage('you', `<div class="meta">Erro ao iniciar workflow: HTTP ${resp.status}</div>`);
+          setStatus('Erro ao iniciar workflow');
           return;
         }
-        const data = await res.json();
-        if (data.status && data.status.toLowerCase() === 'completed') {
-          appendMessage('you', marked.parse(data.response || data.result || data.reply || ''));
-          setStatus('Finalizado');
-          localStorage.removeItem('last_request_id');
-          clearClientTimeout();
-        } else {
-          setStatus('Status atual: ' + (data.status || 'processing'));
-        }
       } catch (err) {
-        setStatus('Erro ao checar status: ' + err.message);
+        appendMessage('you', `<div class="meta">Erro de rede ao iniciar workflow: ${escapeHtml(String(err))}</div>`);
+        setStatus('Erro de rede');
+        return;
       }
-    }
 
-    // Expose manual check for debugging
-    window.checkStatusManual = checkStatusManual;
+      setStatus('Workflow iniciado. Aguardando resposta...');
 
-    // Helper
-    function escapeHtml(unsafe) {
-      return String(unsafe)
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;")
-        .replace(/"/g, "&quot;")
-        .replace(/'/g, "&#039;");
-    }
-
-    // Auto-connect WS on load if last_request_id exists
-    window.addEventListener('load', () => {
-      const last = localStorage.getItem('last_request_id');
-      if (last) {
+      // If WS available, ensure connection and subscribe; otherwise start polling
+      if (WS_URL) {
         connectWebSocket();
-        setStatus('Aguardando resposta (push) — request_id: ' + last);
+        // send subscribe message once connected (if already open)
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          try { ws.send(JSON.stringify({ type: 'subscribe', request_id: requestId })); } catch(e) {}
+        }
       }
+
+      // start client timeout
+      startClientTimeout(requestId);
+
+      // Start polling as fallback (and also to show progress while waiting for push)
+      (async () => {
+        const result = await pollStatus(requestId, (update) => {
+          if (update.status === 'not_found') {
+            setStatus('Aguardando criação do status...');
+            return;
+          }
+          if (update.status === 'pending') {
+            const preview = update.text ? (update.text.length > 300 ? update.text.slice(0,300) + '…' : update.text) : 'Processando…';
+            setStatus('Processando (polling)…');
+            // show a small preview if available
+            if (update.text) {
+              // replace last preview bubble if exists
+              const lastPreview = document.getElementById('preview-' + requestId);
+              if (lastPreview) lastPreview.remove();
+              const el = appendMessage('you', '<div id="preview-' + requestId + '" class="meta">Preview: ' + escapeHtml(preview) + '</div>');
+            }
+            return;
+          }
+          if (update.status === 'completed') {
+            clearClientTimeout();
+            const payload = update.payload || {};
+            // prefer HTML if present
+            if (payload.response_text_html) {
+              appendMessage('you', payload.response_text_html);
+            } else {
+              const text = update.text || '';
+              appendMessage('you', marked.parse(normalizeBrokenText(text)));
+            }
+            setStatus('Finalizado (polling) — ' + requestId);
+            localStorage.removeItem('last_request_id');
+            return;
+          }
+          if (update.status === 'error') {
+            appendMessage('you', `<div class="meta">Erro: ${escapeHtml(update.error || 'unknown')}</div>`);
+            setStatus('Erro no polling');
+            return;
+          }
+          if (update.status === 'timeout') {
+            appendMessage('you', '<div class="meta">⏱️ Tempo esgotado aguardando resposta (polling).</div>');
+            setStatus('Timeout polling');
+            return;
+          }
+        }, { intervalMs: DEFAULT_POLL_INTERVAL_MS, maxAttempts: DEFAULT_MAX_ATTEMPTS });
+
+        if (!result.ok) {
+          // if polling timed out and WS is available, keep waiting for push; otherwise show final timeout
+          if (!WS_URL) {
+            clearClientTimeout();
+            appendMessage('you', '<div class="meta">Nenhuma resposta recebida. Tente novamente mais tarde.</div>');
+            setStatus('Sem resposta');
+            localStorage.removeItem('last_request_id');
+          } else {
+            setStatus('Aguardando push via WebSocket (se disponível)...');
+          }
+        }
+      })();
     });
+
+    // Inicializar WebSocket se configurado
+    if (WS_URL) connectWebSocket();
+
+    // Se houver um last_request_id salvo ao carregar a página, retomar polling/subscrição
+    (function resumePending() {
+      const last = localStorage.getItem('last_request_id');
+      if (!last) return;
+      appendMessage('you', `<div class="meta">Retomando requisição pendente: ${escapeHtml(last)}</div>`);
+      setStatus('Retomando requisição pendente...');
+      // subscribe via WS if available
+      if (WS_URL) {
+        connectWebSocket();
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          try { ws.send(JSON.stringify({ type: 'subscribe', request_id: last })); } catch(e) {}
+        }
+      }
+      // start polling as fallback
+      startClientTimeout(last);
+      (async () => {
+        await pollStatus(last, (update) => {
+          if (update.status === 'completed') {
+            clearClientTimeout();
+            const payload = update.payload || {};
+            if (payload.response_text_html) {
+              appendMessage('you', payload.response_text_html);
+            } else {
+              appendMessage('you', marked.parse(normalizeBrokenText(update.text || '')));
+            }
+            setStatus('Finalizado (retomado) — ' + last);
+            localStorage.removeItem('last_request_id');
+          } else {
+            setStatus('Retomando: ' + (update.status || 'pending'));
+          }
+        }, { intervalMs: DEFAULT_POLL_INTERVAL_MS, maxAttempts: DEFAULT_MAX_ATTEMPTS });
+      })();
+    })();
   </script>
 </body>
 </html>
