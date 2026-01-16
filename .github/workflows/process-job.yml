@@ -1,0 +1,82 @@
+name: Process job (wait for external callback)
+
+on:
+  repository_dispatch:
+    types: [process-job]
+
+jobs:
+  process:
+    runs-on: ubuntu-latest
+    env:
+      TIMEOUT_SECONDS: 180
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read payload
+        id: payload
+        run: |
+          REQ=$(jq -r '.client_payload.request_id' "$GITHUB_EVENT_PATH")
+          SCEN=$(jq -r '.client_payload.scenario' "$GITHUB_EVENT_PATH")
+          NEEDS_POLLING=$(jq -r '.client_payload.needs_polling // "false"' "$GITHUB_EVENT_PATH")
+          echo "request_id=$REQ" >> $GITHUB_OUTPUT
+          echo "scenario=$SCEN" >> $GITHUB_OUTPUT
+          echo "needs_polling=$NEEDS_POLLING" >> $GITHUB_OUTPUT
+
+      - name: Set env vars
+        run: |
+          echo "REQ=${{ steps.payload.outputs.request_id }}" >> $GITHUB_ENV
+          echo "SCEN=${{ steps.payload.outputs.scenario }}" >> $GITHUB_ENV
+          echo "NEEDS_POLLING=${{ steps.payload.outputs.needs_polling }}" >> $GITHUB_ENV
+
+      - name: If scenario 1 and no polling, nothing to wait
+        if: env.NEEDS_POLLING == 'false'
+        run: |
+          echo "No polling required for $REQ (branch without polling)."
+
+      - name: Wait for callback (if needs_polling)
+        if: env.NEEDS_POLLING == 'true'
+        run: |
+          FILE=status/$REQ.json
+          cat > $FILE <<EOF
+          {
+            "request_id": "$REQ",
+            "status": "processing",
+            "createdAt": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+            "updatedAt": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+            "response": null
+          }
+          EOF
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add $FILE
+          git commit -m "Processing $REQ (needs_polling watcher started)" || echo "no changes"
+          git push
+
+          ELAPSED=0
+          INTERVAL=20
+          while [ $ELAPSED -lt $TIMEOUT_SECONDS ]; do
+            sleep $INTERVAL
+            ELAPSED=$((ELAPSED + INTERVAL))
+            if [ -f "status/$REQ.callback.json" ]; then
+              echo "Callback detected, applying..."
+              mv status/$REQ.callback.json status/$REQ.json
+              git add status/$REQ.json
+              git commit -m "Apply external callback for $REQ" || echo "no changes"
+              git push
+              exit 0
+            fi
+          done
+
+          cat > $FILE <<EOF
+          {
+            "request_id": "$REQ",
+            "status": "timed_out",
+            "createdAt": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+            "updatedAt": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+            "response": null
+          }
+          EOF
+          git add $FILE
+          git commit -m "Timeout $REQ (needs_polling watcher)" || echo "no changes"
+          git push
