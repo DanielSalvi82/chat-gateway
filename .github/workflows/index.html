@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Chat Gateway</title>
+  <style>
+    :root{
+      --primary:#16a34a;
+      --accent:#0b63d6;
+      --bg:#f7fafc;
+      --card:#ffffff;
+      --muted:#6b7280;
+      --radius:10px;
+      --gap:12px;
+      --pad:16px;
+      font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
+    }
+    html,body{height:100%;margin:0;background:linear-gradient(180deg,#f3f6fb 0%, #f7fafc 100%);color:#0f172a}
+    .wrap{max-width:820px;margin:28px auto;padding:18px}
+    .card{background:var(--card);border-radius:var(--radius);box-shadow:0 8px 30px rgba(2,6,23,0.06);padding:var(--pad);display:flex;flex-direction:column;gap:var(--gap)}
+    header.top{display:flex;justify-content:space-between;align-items:center}
+    .welcome{font-size:18px;font-weight:600}
+    .subtitle{font-size:13px;color:var(--muted);margin-top:6px}
+    .row{display:flex;gap:10px;align-items:center}
+    .field{display:flex;flex-direction:column;gap:6px}
+    input[type="text"], input[type="tel"]{
+      padding:10px 12px;border-radius:8px;border:1px solid #e6edf3;background:#fff;min-width:220px;
+      font-size:14px;color:#0f172a;outline:none;
+    }
+    button.primary{
+      background:var(--primary);color:#fff;border:0;padding:10px 14px;border-radius:8px;cursor:pointer;font-weight:600;
+      box-shadow:0 6px 18px rgba(16,185,129,0.12);
+    }
+    button.ghost{background:transparent;border:1px solid #e6edf3;padding:8px 12px;border-radius:8px;cursor:pointer}
+    .meta{display:flex;gap:12px;align-items:center}
+    .user-display{font-size:14px;color:#0f172a;background:#f1f5f9;padding:8px 10px;border-radius:8px;border:1px dashed #e6edf3}
+    .composer{display:flex;gap:8px;margin-top:12px}
+    .composer input{flex:1}
+    .small{font-size:12px;color:var(--muted)}
+    .hint{font-size:13px;color:#374151}
+    @media (max-width:640px){
+      .row{flex-direction:column;align-items:stretch}
+      .meta{flex-direction:column;align-items:flex-start}
+      .composer{flex-direction:column}
+      .composer button{width:100%}
+    }
+    #log{white-space:pre-wrap;background:#f6f8fa;padding:12px;border-radius:6px;margin-top:12px;min-height:120px}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card" role="region" aria-label="Chat gateway">
+      <header class="top" aria-hidden="false">
+        <div>
+          <div class="welcome">👋 Bem-vindo ao Chat Gateway! — configure seu UserID abaixo</div>
+          <div class="subtitle">👋 Welcome to Chat Gateway! — set your UserID below</div>
+        </div>
+        <div class="small">PT / EN</div>
+      </header>
+
+      <section aria-label="user settings" style="margin-top:14px">
+        <div class="row">
+          <div class="field" style="flex:1">
+            <label class="small" for="userid">Usuário / User ID</label>
+            <input id="userid" type="tel" inputmode="numeric" placeholder="16268642300" aria-label="User ID" />
+          </div>
+
+          <div class="meta" style="align-items:center">
+            <button id="saveUser" class="primary" aria-label="Salvar / Save">Salvar / Save</button>
+            <div id="userDisplay" class="user-display" aria-live="polite">Usuário / User: —</div>
+          </div>
+        </div>
+        <div class="hint" style="margin-top:10px">Seu UserID será salvo localmente no navegador e usado para identificar suas mensagens.</div>
+      </section>
+
+      <hr style="border:none;border-top:1px solid #eef2f7;margin:14px 0" />
+
+      <section aria-label="chat composer">
+        <div class="composer" role="form" aria-label="message composer">
+          <input id="message" type="text" placeholder="Digite sua mensagem... / Type your message..." aria-label="message input" />
+          <button id="send" class="primary" aria-label="Enviar / Send">Enviar / Send</button>
+        </div>
+        <div style="margin-top:10px;display:flex;gap:12px;align-items:center">
+          <div class="small">Última resposta: <span id="lastResponse" style="font-weight:600;color:#0f172a">—</span></div>
+          <div class="small" style="color:var(--muted)">Armazenamento temporário: Google Sheets (opcional)</div>
+        </div>
+
+        <div id="log" aria-live="polite">Nenhum request verificado ainda.</div>
+      </section>
+    </div>
+  </div>
+
+  <script>
+    // Config keys
+    const LAST_USER_KEY = 'chat_gateway_userid';
+    const LAST_REQUEST_KEY = 'chat_gateway_last_request_id';
+    const LAST_RESPONSE_KEY = 'chat_gateway_last_response';
+
+    // Repo config for polling
+    const GITHUB_USER = 'DanielSalvi82';
+    const GITHUB_REPO = 'chat-gateway';
+    const BRANCH = 'main';
+
+    // Elements
+    const useridEl = document.getElementById('userid');
+    const saveBtn = document.getElementById('saveUser');
+    const userDisplay = document.getElementById('userDisplay');
+    const messageEl = document.getElementById('message');
+    const sendBtn = document.getElementById('send');
+    const lastResponseEl = document.getElementById('lastResponse');
+    const logEl = document.getElementById('log');
+
+    // Restore saved user and last response
+    function restoreUI(){
+      const saved = localStorage.getItem(LAST_USER_KEY);
+      if(saved){
+        useridEl.value = saved;
+        userDisplay.textContent = 'Usuário / User: ' + saved;
+      } else {
+        userDisplay.textContent = 'Usuário / User: —';
+      }
+      const lastResp = localStorage.getItem(LAST_RESPONSE_KEY);
+      if(lastResp){
+        lastResponseEl.textContent = lastResp;
+      }
+      const lastReq = localStorage.getItem(LAST_REQUEST_KEY);
+      if(lastReq){
+        // optional: show last request id in log
+      }
+    }
+    restoreUI();
+
+    // Save user
+    saveBtn.addEventListener('click', () => {
+      const v = useridEl.value.trim();
+      if(!v){
+        alert('Informe um UserID / Provide a UserID');
+        return;
+      }
+      localStorage.setItem(LAST_USER_KEY, v);
+      userDisplay.textContent = 'Usuário / User: ' + v;
+      saveBtn.textContent = 'Salvo ✓';
+      setTimeout(()=> saveBtn.textContent = 'Salvar / Save', 1200);
+    });
+
+    // Helper: fetch status JSON from GitHub raw
+    async function fetchStatus(requestId){
+      const url = `https://raw.githubusercontent.com/${GITHUB_USER}/${GITHUB_REPO}/${BRANCH}/status/${requestId}.json`;
+      const res = await fetch(url, { cache: 'no-store' });
+      if (!res.ok) {
+        if (res.status === 404) throw new Error('Arquivo de status não encontrado (404). Execute Start job no Actions.');
+        throw new Error('HTTP ' + res.status);
+      }
+      return res.json();
+    }
+
+    // Polling logic: respects poll_at, interval 20s
+    let pollTimer = null;
+    async function pollOnce(requestId){
+      try {
+        const s = await fetchStatus(requestId);
+
+        // Respect poll_at: do not start polling until poll_at has passed
+        if (s.poll_at) {
+          const pollAt = new Date(s.poll_at).getTime();
+          const now = Date.now();
+          if (now < pollAt) {
+            const secs = Math.ceil((pollAt - now) / 1000);
+            logEl.textContent = `Polling iniciará em ${secs}s\n\n` + JSON.stringify(s, null, 2);
+            return;
+          }
+        }
+
+        // Prefer formatted_text if present
+        const respText = (s.response && (s.response.formatted_text || s.response.text)) ? (s.response.formatted_text || s.response.text) : null;
+
+        let header = '';
+        if (s.status === 'pending') header = 'Aguardando (pending)\n\n';
+        if (s.status === 'processing') header = 'Processando (processing)\n\n';
+        if (s.status === 'completed') header = 'Concluído (completed)\n\n';
+        if (s.status === 'timed_out') header = 'Tempo esgotado (timed_out)\n\n';
+
+        let body = JSON.stringify(s, null, 2);
+        if (respText) body = respText + '\n\n' + body;
+
+        logEl.textContent = header + body;
+
+        if (respText) {
+          localStorage.setItem(LAST_RESPONSE_KEY, respText);
+          lastResponseEl.textContent = respText;
+        }
+
+        if (s.status === 'completed' || s.status === 'timed_out') {
+          clearInterval(pollTimer);
+          pollTimer = null;
+        }
+      } catch (err) {
+        logEl.textContent = 'Erro: ' + err.message;
+      }
+    }
+
+    // Start polling for a given request id: immediate check (respects poll_at) then every 20s
+    function startPollingFor(requestId){
+      if (pollTimer) return;
+      pollOnce(requestId);
+      pollTimer = setInterval(()=> pollOnce(requestId), 20000); // 20s
+    }
+
+    // Send message: create request id and instruct user to run Start job
+    sendBtn.addEventListener('click', () => {
+      const uid = localStorage.getItem(LAST_USER_KEY) || useridEl.value.trim();
+      if(!uid){
+        alert('Informe um UserID antes de enviar / Provide a UserID first');
+        return;
+      }
+      const text = messageEl.value.trim();
+      if(!text) return;
+      const rid = 'r-' + Date.now() + '-' + Math.random().toString(36).slice(2,8);
+      localStorage.setItem(LAST_REQUEST_KEY, rid);
+      lastResponseEl.textContent = 'Aguardando resposta...';
+      logEl.textContent = `Request criado localmente: ${rid}\n\nAgora rode o workflow Start job no GitHub Actions com esse request_id.`;
+      messageEl.value = '';
+    });
+
+    // Allow Enter to send message
+    messageEl.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') sendBtn.click();
+    });
+
+    // Expose small API for integration
+    window.ChatGateway = {
+      setUser: (u) => { useridEl.value = u; saveBtn.click(); },
+      setLastResponse: (text) => { localStorage.setItem(LAST_RESPONSE_KEY, text); lastResponseEl.textContent = text; },
+      startPolling: (requestId) => { startPollingFor(requestId); }
+    };
+  </script>
+</body>
+</html>
