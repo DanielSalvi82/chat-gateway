@@ -47,12 +47,12 @@
   <script>
     // CONFIGURAÇÃO - ajuste estes endpoints
     const WEBHOOK_REQUEST = "https://hook.us2.make.com/zdh65fxga487rr7a4rlnwspoefard0o5"; // Make: inicia job
-    const OWNER = 'seu-user-ou-org';      // ex: 'DanielSalvi82'
-    const REPO = 'seu-repo';              // ex: 'travel_Agent_API_call'
-    const BRANCH = 'main';                // branch onde está a pasta status
-    const DEFAULT_POLL_INTERVAL_MS = 3000; // intervalo padrão entre polls
-    const DEFAULT_MAX_ATTEMPTS = 60;       // limite de polls antes de timeout
-    const CLIENT_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutos client-side timeout
+    const OWNER = 'seu-user-ou-org';
+    const REPO = 'seu-repo';
+    const BRANCH = 'main';
+    const DEFAULT_POLL_INTERVAL_MS = 3000;
+    const DEFAULT_MAX_ATTEMPTS = 60;
+    const CLIENT_TIMEOUT_MS = 5 * 60 * 1000;
 
     // UI helpers
     const $ = id => document.getElementById(id);
@@ -138,7 +138,6 @@
         try {
           const data = await fetchJsonNoCache(url);
 
-          // Se poll_at estiver presente, aguardar até o timestamp sugerido
           if (data.poll_at) {
             const pollAt = Date.parse(data.poll_at);
             if (!Number.isNaN(pollAt)) {
@@ -146,26 +145,22 @@
               if (pollAt > now) {
                 const waitMs = Math.min(pollAt - now, intervalMs);
                 await sleep(waitMs);
-                continue; // re-tentar após aguardar
+                continue;
               }
             }
           }
 
-          // Se status completed e tem resposta, retornar
           if (data.status === 'completed') {
             const best = extractBestResponse(data);
             if (best) {
               onUpdate({ status: 'completed', payload: data, text: best });
               return { ok: true, data };
             }
-            // se completed mas sem texto, ainda aguardar mais um pouco
           }
 
-          // Se status diferente ou sem resposta ainda, chamar onUpdate com progresso parcial
           onUpdate({ status: data.status ?? 'pending', payload: data, text: extractBestResponse(data) ?? null });
 
         } catch (err) {
-          // 404 significa que o arquivo ainda não foi criado; apenas log e continuar
           if (err.status === 404) {
             onUpdate({ status: 'not_found', error: 'status file not found yet' });
           } else {
@@ -173,21 +168,17 @@
           }
         }
 
-        // aguardar antes do próximo poll
         await sleep(intervalMs);
       }
 
-      // timeout
       onUpdate({ status: 'timeout', error: 'max polling attempts reached' });
       return { ok: false, error: 'timeout' };
     }
 
     // Decision function: should we trigger the remote Fireworks proxy?
-    // Adjust this function to your rules. If true -> proxy (Cenário 2). If false -> Cenário 1.
     function needsRemoteProxy(text) {
       if (!text) return false;
       const t = text.trim();
-      // Example rules (customize):
       if (t.startsWith('/remote')) return true;
       if (t.length > 300) return true;
       return false;
@@ -243,21 +234,44 @@
           console.log('Cenário 1: POST payload', payload1);
 
           try {
+            // --- INÍCIO: trecho solicitado — garante leitura do body e exibição no UI ---
             const resp = await fetch(WEBHOOK_REQUEST, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify(payload1)
             });
-            console.log('Cenário 1: webhook response', resp.status, resp.statusText);
-            if (!resp.ok) {
-              appendMessage('you', `<div class="meta">Erro ao chamar webhook (cenário 1): HTTP ${resp.status}</div>`);
-              setStatus('Erro ao chamar webhook (cenário 1)');
-              return;
+
+            console.log('Cenário 1: webhook HTTP status', resp.status, resp.statusText);
+
+            // Tentar ler o corpo da resposta como texto (cobre JSON e texto simples)
+            let rawBody = null;
+            try {
+              rawBody = await resp.text();
+              console.log('Cenário 1: raw response body:', rawBody);
+            } catch (readErr) {
+              console.warn('Cenário 1: não foi possível ler o body da resposta', readErr);
             }
-            // webhook chamado com sucesso; exibir confirmação e NÃO iniciar polling
-            appendMessage('you', `<div class="meta">Webhook (cenário 1) enviado com sucesso. Processo iniciado externamente.</div>`);
+
+            // Se houver conteúdo, tentar parsear como JSON e exibir; caso contrário exibir texto cru
+            if (rawBody && rawBody.trim().length > 0) {
+              try {
+                const parsed = JSON.parse(rawBody);
+                console.log('Cenário 1: parsed JSON body:', parsed);
+                // Exibir mensagem amigável no UI
+                const display = parsed.message || parsed.reply || JSON.stringify(parsed);
+                appendMessage('you', `<div class="meta">${escapeHtml(String(display))}</div>`);
+              } catch (e) {
+                // não era JSON
+                appendMessage('you', `<div class="meta">${escapeHtml(rawBody)}</div>`);
+              }
+            } else {
+              // Sem corpo: exibir ack simples
+              appendMessage('you', `<div class="meta">Webhook (cenário 1) enviado com sucesso. Processo iniciado externamente.</div>`);
+            }
+            // --- FIM: trecho solicitado ---
+
             setStatus('Webhook enviado (cenário 1) — sem polling');
-            // Não iniciar polling; o processo é iniciado externamente
+
           } catch (err) {
             console.error('Cenário 1: erro fetch', err);
             appendMessage('you', `<div class="meta">Erro de rede ao chamar webhook (cenário 1): ${escapeHtml(String(err))}</div>`);
@@ -280,7 +294,6 @@
 
         setStatus('Enviando requisição ao workflow (cenário 2)...');
 
-        // POST to Make webhook (fire the workflow)
         try {
           const resp = await fetch(WEBHOOK_REQUEST, {
             method: 'POST',
